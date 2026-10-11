@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from './supabase.js'
+import { guessType, deriveZones, calcZones, ruleChecks, safetyFlags, checkAIPlan, weeksToRace, suggestPhase } from './coachRules.js'
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const PHASES = [
@@ -16,6 +17,7 @@ const PHASES = [
 const SESSION_TYPES = [
   { id:'rest',     label:'พัก',      icon:'💤', color:'#4b5563' },
   { id:'easy',     label:'Easy',     icon:'🟢', color:'#22c55e' },
+  { id:'moderate', label:'Moderate', icon:'🟤', color:'#84cc16' },
   { id:'fastlek',  label:'Fastlek',  icon:'🟡', color:'#f59e0b' },
   { id:'interval', label:'Interval', icon:'🔴', color:'#ef4444' },
   { id:'tempo',    label:'Tempo',    icon:'🟠', color:'#f97316' },
@@ -26,17 +28,6 @@ const SESSION_TYPES = [
 
 const DAYS = ['จันทร์','อังคาร','พุธ','พฤหัส','ศุกร์','เสาร์','อาทิตย์']
 const DAY_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-
-const guessType = t => {
-  const s=(t||'').toLowerCase()
-  if(!t||t.includes('พัก')||s==='rest'||s==='-'||s==='') return 'rest'
-  if(s.includes('long run')||s.includes('longrun')||s.includes('long')) return 'longrun'
-  if(s.includes('interval')||/\d{3,4}\s*[×x*xX]/.test(s)||/[×x*xX]\s*\d{2,}/.test(s)) return 'interval'
-  if(s.includes('fastlek')||s.includes('fartlek')||s.includes('สลับ')||s.includes('fast')) return 'fastlek'
-  if(s.includes('easy')||s.includes('อีซี่')||s.includes('ง่าย')) return 'easy'
-  if(s.includes('stride')||s.includes('สตรายด์')) return 'stride'
-  return 'other'
-}
 
 const phaseObj = id => PHASES.find(p=>p.id===id)||PHASES[0]
 const sessObj  = id => SESSION_TYPES.find(s=>s.id===id)||SESSION_TYPES[0]
@@ -52,27 +43,16 @@ const emptyWeek = (num=1, phase='base') => ({ weekNum:num, phase, targetVolume:4
 const IC = { background:'#0d1117', border:'1px solid #374151', borderRadius:8, color:'#f9fafb', padding:'11px 14px', fontSize:16, width:'100%', outline:'none', fontFamily:'inherit', boxSizing:'border-box' }
 const BTN = (bg, fg='#000') => ({ background:bg, color:fg, border:'none', borderRadius:10, padding:'16px 20px', cursor:'pointer', fontWeight:'bold', fontSize:16, fontFamily:'inherit' })
 
-// ── ANTHROPIC API ─────────────────────────────────────────────────────────────
-async function callClaude(sys, usr) {
-  const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      system: sys,
-      messages: [{ role: 'user', content: usr }]
-    })
-  })
-  if (!res.ok) throw new Error(`API Error: ${res.status}`)
-  const d = await res.json()
-  return d.content?.[0]?.text || ''
+// ── AI COACH (เรียกผ่าน Supabase Edge Function — API key อยู่ฝั่ง server) ──────
+async function callCoach(task, input) {
+  const { data, error } = await supabase.functions.invoke('coach', { body: { task, input } })
+  if (error) {
+    let msg = error.message
+    try { msg = (await error.context.json()).error || msg } catch {}
+    throw new Error(msg)
+  }
+  if (data?.error) throw new Error(data.error)
+  return data
 }
 
 // ── VOLUME CALCULATOR HELPERS ─────────────────────────────────────────────────
@@ -81,11 +61,6 @@ const paceToDecimal = str => {
   const s = String(str).trim()
   if (s.includes(':')) { const [m,sec]=s.split(':').map(Number); return m+sec/60 }
   return parseFloat(s)||6.0
-}
-const decimalToPace = dec => {
-  if (!dec||isNaN(dec)) return '--:--'
-  const m=Math.floor(dec), sec=Math.round((dec-m)*60)
-  return `${m}:${String(sec).padStart(2,'0')}`
 }
 
 // ── WEEKLY VOLUME GUIDE ───────────────────────────────────────────────────────
@@ -218,7 +193,7 @@ export default function App() {
       // Zones
       const { data: z } = await supabase.from('zones').select('*')
         .eq('user_id', uid).order('tested_at', { ascending: false }).limit(1)
-      if (z?.length) setZones(z[0])
+      if (z?.length) setZones(deriveZones(z[0]))
 
       setScreen('app')
     } catch (e) { console.error(e); setScreen('goal') }
@@ -300,7 +275,7 @@ export default function App() {
   const saveZones = async (zData) => {
     const { data } = await supabase.from('zones')
       .insert({ user_id: user.id, ...zData }).select().single()
-    setZones(data)
+    if (data) setZones(deriveZones(data))
   }
 
   // ── Archive & Next ────────────────────────────────────────────────────────
@@ -324,24 +299,34 @@ export default function App() {
     setAiResult(null); setValResult(null); setTab('plan')
   }
 
+  // ── ข้อเท็จจริงที่ระบบคำนวณเอง (ส่งให้ AI เป็นข้อมูล ไม่ให้ AI เดา) ─────────
+  const prevWeek  = history.length ? history[history.length - 1] : null
+  const prevVol   = prevWeek ? totalVol(prevWeek) : 0
+  const prevLR    = history.slice(-4).reduce((m, w2) => Math.max(m, lrKm(w2)), 0)
+  const ruleCtx   = () => ({ prevVolume: prevVol, prevLongRun: prevLR, maxLongRun: +profile?.max_long_run || null, phase: week.phase, weekNum: week.weekNum, raceDate: profile?.race_date })
+  const zoneText  = () => zones
+    ? `Zone (จาก Speed Test): Easy/LT1 ${zones.fatmax_slow}-${zones.lt1_fast} | Moderate ${zones.moderate_slow}-${zones.moderate_fast} | LT2 ${zones.lt2_slow}-${zones.lt2_fast} | VO2max ${zones.vo2max_slow}-${zones.vo2max_fast} | MP(ประมาณ) ${zones.marathon_pace}`
+    : 'Zone: ยังไม่ได้ทำ Speed Test — ใช้ RPE/HR'
+  const factsText = () => {
+    const wl = weeksToRace(profile?.race_date)
+    return [
+      `Phase:${week.phase} W${week.weekNum} | วันแข่ง:${profile?.race_date || 'ไม่ได้ตั้ง'}${wl !== null ? ` (เหลือ ${wl} สัปดาห์ → phase ที่ควรเป็น: ${suggestPhase(wl)})` : ''}`,
+      `Pace เป้ามาราธอน:${profile?.target_pace || '-'} | Long run สูงสุดที่ตั้งไว้:${profile?.max_long_run || '-'} km | Long run ยาวสุดใน 4 สัปดาห์:${prevLR || '-'} km`,
+      `Volume สัปดาห์ก่อน:${prevVol.toFixed(1)} km | Down week ตามรอบ: ${week.weekNum % 4 === 0 ? 'ใช่' : 'ไม่ใช่'}`,
+      zoneText(),
+    ].join('\n')
+  }
+
   // ── Plan Validator ────────────────────────────────────────────────────────
   const validatePlan = async () => {
     setValLoad(true); setValResult(null)
+    const rules = ruleChecks({ ...ruleCtx(), sessions: week.sessions, targetVolume: week.targetVolume })
     try {
-      const sys = `คุณคือโค้ชมาราธอน Elite ตรวจโปรแกรมการซ้อมว่าถูกหลักการ 80/20, Progressive Overload, Stress-Recovery, Phase Specificity ไหม ตอบ JSON เท่านั้น ห้ามมี markdown`
-      const planText = week.sessions.map((d, i) => `${DAY_SHORT[i]}: ${d.plan || 'พัก'}`).join('\n')
-      const hardDays = week.sessions.filter(d => ['interval','tempo','fastlek','longrun'].includes(d.type)).length
-      const hasLR = week.sessions.some(d => d.type === 'longrun' && d.plan)
-      const usr = `Phase:${week.phase} W${week.weekNum} เป้า:${week.targetVolume}km Pace:${profile?.target_pace||'5:30'}
-โปรแกรม:\n${planText}
-Hard sessions:${hardDays} Long run:${hasLR?'มี':'ไม่มี'}
-
-ตอบ JSON (ห้ามมี markdown ห้ามมีข้อความนอก JSON):
-{"verdict":"ผ่าน","score":85,"summary":"สรุป","checks":[{"rule":"80/20 Rule","pass":true,"comment":"ok"},{"rule":"วันหนักไม่ติดกัน","pass":true,"comment":"ok"},{"rule":"Long Run","pass":true,"comment":"ok"},{"rule":"Phase Specificity","pass":true,"comment":"ok"},{"rule":"Volume","pass":true,"comment":"ok"}],"warnings":[],"suggestions":["แนะนำ"]}`
-      const raw = await callClaude(sys, usr)
-      const cleaned = raw.replace(/```json|```/g, '').trim()
-      setValResult(JSON.parse(cleaned))
-    } catch (e) { setValResult({ error: 'ตรวจไม่สำเร็จ: ' + e.message }) }
+      const planText = week.sessions.map(d => `${d.day}: ${d.plan || 'พัก'} [${d.type}]`).join('\n')
+      const ruleText = rules.map(r => `${r.pass ? '✓' : '✗'} ${r.rule}: ${r.comment}`).join('\n')
+      const ai = await callCoach('validate', `${factsText()}\nเป้า Volume:${week.targetVolume} km\n\nโปรแกรม:\n${planText}\n\nผลตรวจกฎจากระบบ:\n${ruleText}`)
+      setValResult({ ...ai, ruleChecks: rules })
+    } catch (e) { setValResult({ error: 'AI ตรวจไม่สำเร็จ: ' + e.message, ruleChecks: rules }) }
     setValLoad(false)
   }
 
@@ -349,14 +334,14 @@ Hard sessions:${hardDays} Long run:${hasLR?'มี':'ไม่มี'}
   const runAI = async () => {
     setAiLoad(true); setAiResult(null)
     try {
-      const sys = `คุณคือโค้ชมาราธอน Elite ใช้หลักการ Maffetone, Daniels, Seiler 80/20, Norwegian Method ตอบภาษาไทย กระชับ ตอบ JSON เท่านั้น ห้ามมี markdown`
       const planText = week.sessions.map(d => `${d.day}: ${d.plan || (d.type === 'rest' ? 'พัก' : 'ไม่ได้วาง')}`).join('\n')
-      const actText  = week.sessions.map(d => `${d.day}: ${d.done ? `✓ ${d.distance}km HR:${d.hr} RPE:${d.rpe} "${d.feel}"` : d.type === 'rest' ? 'พัก' : 'ไม่ได้ทำ'}`).join('\n')
-      const prevText = history.slice(-3).map(w2 => `W${w2.weekNum}[${w2.phase}]:vol=${totalVol(w2).toFixed(1)}km RPE=${avgRPE(w2)} LR=${lrKm(w2)}km`).join('\n')
-      const zoneInfo = zones ? `Zone:Easy${zones.fatmax_slow}-${zones.lt1_fast}|LT2${zones.lt2_slow}-${zones.lt2_fast}|MP${zones.marathon_pace}` : '(ยังไม่ได้ทำ Speed Test)'
-      const usr = `Pace:${profile?.target_pace||'5:30'} Phase:${week.phase} W${week.weekNum} วันแข่ง:${profile?.race_date||'ไม่ได้ตั้ง'}\n${zoneInfo}\nแผน:\n${planText}\nจริง:\n${actText}\nVol:${totalVol(week).toFixed(1)}/${week.targetVolume}km RPE:${avgRPE(week)} LR:${lrKm(week)}km\nNote:${week.notes||'-'}\nประวัติ:\n${prevText||'ยังไม่มี'}\n\nตอบ JSON:{"assessment":"...","signals":["s1","s2"],"decision":"เพิ่ม|คงที่|ถอย|DownWeek","reason":"...","nextPhase":"base","nextVolume":42,"coachTip":"...","nextPlan":[{"day":"จันทร์","plan":"พัก"},{"day":"อังคาร","plan":"Easy 60 นาที + Stride ×4"},{"day":"พุธ","plan":"พัก"},{"day":"พฤหัส","plan":"Fastlek 1/1 ×18"},{"day":"ศุกร์","plan":"Long run 18 km Easy"},{"day":"เสาร์","plan":"Easy 50 นาที"},{"day":"อาทิตย์","plan":"พัก"}]}`
-      const raw = await callClaude(sys, usr)
-      setAiResult(JSON.parse(raw.replace(/```json|```/g, '').trim()))
+      const actText  = week.sessions.map(d => `${d.day}: ${d.done ? `✓ ${d.distance}km ${d.duration}min pace:${d.pace || '-'} HR:${d.hr || '-'} RPE:${d.rpe} "${d.feel}" ${d.notes ? `(${d.notes})` : ''}` : d.type === 'rest' ? 'พัก' : 'ไม่ได้ทำ'}`).join('\n')
+      const prevText = history.slice(-4).map(w2 => `W${w2.weekNum}[${w2.phase}]: vol=${totalVol(w2).toFixed(1)}km RPE=${avgRPE(w2)} LR=${lrKm(w2)}km`).join('\n')
+      const flags    = safetyFlags(week.sessions, week.notes)
+      const flagText = flags.length ? flags.map(f => `[${f.level === 'red' ? 'อันตราย' : 'เฝ้าระวัง'}] ${f.day}: ${f.text}`).join('\n') : 'ไม่พบ'
+      const ai = await callCoach('analyze', `${factsText()}\n\nแผน:\n${planText}\n\nผลจริง:\n${actText}\nVol จริง:${totalVol(week).toFixed(1)}/${week.targetVolume}km RPE เฉลี่ย:${avgRPE(week)} LR:${lrKm(week)}km\nโน้ตสัปดาห์:${week.notes || '-'}\n\nสัญญาณที่ระบบตรวจพบ:\n${flagText}\n\nประวัติ 4 สัปดาห์:\n${prevText || 'ยังไม่มี'}`)
+      const nextCtx = { ...ruleCtx(), prevVolume: totalVol(week) || prevVol, prevLongRun: Math.max(prevLR, lrKm(week)) }
+      setAiResult({ ...ai, planWarnings: checkAIPlan(ai, nextCtx), localFlags: flags })
     } catch (e) { setAiResult({ error: 'วิเคราะห์ไม่สำเร็จ: ' + e.message }) }
     setAiLoad(false)
   }
@@ -572,7 +557,7 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
       {week.sessions.map((d, i) => {
         const so = sessObj(d.type)
         const hasPlan = d.plan && d.plan.trim() && d.plan !== '-'
-        const vday = valResult?.dayFeedback?.[i]
+        const vday = valResult?.dayFeedback?.find(x => x.day === d.day)
         return (
           <div key={i} style={{ background:'#111827', border:`1px solid ${hasPlan ? so.color+'50' : '#1f2937'}`, borderRadius:12, marginBottom:8 }}>
             <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px' }}>
@@ -600,6 +585,20 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
           {valLoad ? '⏳ กำลังตรวจ...' : '🔍 ตรวจโปรแกรม'}
         </button>
       </div>
+
+      {/* Rule Checks (คำนวณในแอป ไม่ต้องรอ AI) */}
+      {valResult?.ruleChecks?.length > 0 && (
+        <div style={{ background:'#0d1117', border:'1px solid #1f2937', borderRadius:14, padding:14, marginBottom:12 }}>
+          <div style={{ fontSize:11, color:'#6b7280', letterSpacing:2, marginBottom:8 }}>ตรวจตามกฎ</div>
+          {valResult.ruleChecks.map((c, i) => {
+            const col = c.pass ? '#22c55e' : c.level === 'error' ? '#ef4444' : c.level === 'warn' ? '#f59e0b' : '#93c5fd'
+            return <div key={i} style={{ display:'flex', gap:8, marginBottom:5, fontSize:12 }}>
+              <span style={{ color:col, flexShrink:0 }}>{c.pass ? '✓' : c.level === 'info' ? 'ℹ' : '✗'}</span>
+              <div><span style={{ color:c.pass ? '#9ca3af' : col, fontWeight:'bold' }}>{c.rule}</span><span style={{ color:'#6b7280' }}> — {c.comment}</span></div>
+            </div>
+          })}
+        </div>
+      )}
 
       {/* Validator Result */}
       {valResult && !valResult.error && (
@@ -640,6 +639,7 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
 
   return (
     <div style={{ padding:'16px 16px' }}>
+      <SafetyBanner flags={safetyFlags(week.sessions, week.notes)} />
       <div style={{ marginBottom:14 }}>
         <div style={{ fontSize:18, fontWeight:'bold', color:'#f9fafb' }}>บันทึกผลการซ้อม</div>
         <div style={{ fontSize:12, color:'#6b7280' }}>W{week.weekNum} — {doneSess(week)}/{planSess(week)} session</div>
@@ -728,9 +728,10 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
 // ── SUMMARY SCREEN ────────────────────────────────────────────────────────────
 function SummaryScreen({ week, profile, aiResult, aiLoad, onAnalyze, onApply, onArchive, onGoLog }) {
   const ph = phaseObj(week.phase), vol = totalVol(week), pct = Math.min(100, (vol/(week.targetVolume||1))*100)
-  const DC = { 'เพิ่ม':'#22c55e', 'คงที่':'#3b82f6', 'ถอย':'#f59e0b', 'DownWeek':'#a78bfa' }
+  const DC = { 'เพิ่ม':'#22c55e', 'คงที่':'#3b82f6', 'ถอย':'#f59e0b', 'DownWeek':'#a78bfa', 'พักฟื้น':'#ef4444' }
   return (
     <div style={{ padding:'16px 16px' }}>
+      <SafetyBanner flags={safetyFlags(week.sessions, week.notes)} />
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14 }}>
         <div><div style={{ fontSize:11, color:'#6b7280', letterSpacing:2 }}>สรุปสัปดาห์ที่</div><div style={{ fontSize:36, fontWeight:'bold', color:'#f9fafb' }}>{week.weekNum}</div></div>
         <div style={{ background:ph.bg, color:ph.color, border:`1px solid ${ph.color}40`, borderRadius:6, padding:'4px 12px', fontSize:11, fontWeight:'bold', letterSpacing:2 }}>{ph.label}</div>
@@ -768,12 +769,17 @@ function SummaryScreen({ week, profile, aiResult, aiLoad, onAnalyze, onApply, on
             <div style={{ fontSize:11, color:'#6b7280', letterSpacing:2 }}>AI COACH</div>
             <div style={{ background:(DC[aiResult.decision]||'#374151')+'25', color:DC[aiResult.decision]||'#9ca3af', padding:'3px 12px', borderRadius:99, fontSize:12, fontWeight:'bold' }}>{aiResult.decision}</div>
           </div>
+          {aiResult.safetyFlags?.length > 0 && <div style={{ background:'#1c0a0a', border:'1px solid #7f1d1d', borderRadius:8, padding:10, marginBottom:10 }}>{aiResult.safetyFlags.map((f,i) => <div key={i} style={{ fontSize:12, color:'#fca5a5' }}>🚩 {f}</div>)}</div>}
           <div style={{ fontSize:13, color:'#d1d5db', marginBottom:10, lineHeight:1.65 }}>{aiResult.assessment}</div>
           {aiResult.signals?.map((s,i) => <div key={i} style={{ fontSize:12, color:'#6b7280', marginBottom:3 }}>• {s}</div>)}
           <div style={{ fontSize:12, color:'#9ca3af', margin:'8px 0', fontStyle:'italic' }}>{aiResult.reason}</div>
           {aiResult.nextPlan && <div style={{ background:'#111827', borderRadius:10, padding:12, marginTop:10 }}>
             <div style={{ fontSize:11, color:'#6b7280', marginBottom:8 }}>โปรแกรมสัปดาห์หน้า — Vol {aiResult.nextVolume} km</div>
             {aiResult.nextPlan.map((s,i) => <div key={i} style={{ display:'flex', gap:8, marginBottom:5, fontSize:12 }}><span style={{ color:'#4b5563', width:42, flexShrink:0 }}>{s.day.slice(0,3)}</span><span style={{ flexShrink:0 }}>{sessObj(guessType(s.plan)).icon}</span><span style={{ color:'#d1d5db' }}>{s.plan}</span></div>)}
+          </div>}
+          {aiResult.planWarnings?.length > 0 && <div style={{ background:'#1c1007', border:'1px solid #78350f', borderRadius:8, padding:10, marginTop:10 }}>
+            <div style={{ fontSize:11, color:'#f59e0b', marginBottom:4 }}>⚠️ ระบบตรวจโปรแกรมที่ AI เสนอ — ควรพิจารณาก่อนใช้</div>
+            {aiResult.planWarnings.map((w,i) => <div key={i} style={{ fontSize:12, color:'#fcd34d' }}>• {w.rule}: {w.comment}</div>)}
           </div>}
           {aiResult.coachTip && <div style={{ background:'#0f2015', border:'1px solid #22c55e20', borderRadius:8, padding:10, fontSize:12, color:'#86efac', marginTop:10 }}>💡 {aiResult.coachTip}</div>}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginTop:12 }}>
@@ -891,31 +897,20 @@ function ZoneScreen({ userId, zones, onSave }) {
   const [saved, setSaved]   = useState(false)
   const sf = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
-  const dp = dec => { if(!dec||isNaN(dec)) return '--:--'; const m=Math.floor(dec),sec=Math.round((dec-m)*60); return `${m}:${String(sec).padStart(2,'0')}` }
-
+  // ต้องมีแค่ระยะ 3 นาทีก็คำนวณ Zone ได้ (12 นาทีใช้หา VO2max) — สูตรอยู่ใน coachRules.js
   const calculate = () => {
-    const d12=parseFloat(form.dist12),d3=parseFloat(form.dist3),d20=parseFloat(form.dist20)
-    const weight=parseFloat(form.weight),height=parseFloat(form.height),bf=parseFloat(form.bodyFat)
-    if(!d12||!d3||!d20||!weight||!height||!bf) return
-    const p12=(12*60)/(d12/1000),p3=(3*60)/(d3/1000),p20=20/(d20/1000)
-    const vo2=Math.max((d12-504.9)/44.73,20),lt2=p3*1.08,lt1=lt2*1.28
-    const bff=1+(bf-15)*0.008,fm=lt1*1.12*bff,mp=lt2+38
-    setResult({ vo2,p12,p3,p20,lt2,lt1,fm,mp,d12,d3,d20,weight,height,bf })
+    const d12=parseFloat(form.dist12), d3=parseFloat(form.dist3), d20=parseFloat(form.dist20)
+    if (!d3) return
+    setResult({ ...calcZones({ dist12:d12, dist3:d3 }), d12, d3, d20,
+      weight:parseFloat(form.weight)||null, height:parseFloat(form.height)||null, bf:parseFloat(form.bodyFat)||null })
     setSaved(false)
   }
 
   const handleSave = async () => {
     if (!result) return
-    await onSave({
-      dist_12min:result.d12, dist_3min:result.d3, dist_20sec:result.d20,
-      weight_kg:result.weight, height_cm:result.height, body_fat_pct:result.bf, vo2max:result.vo2,
-      fatmax_slow:dp(result.fm*1.05), fatmax_fast:dp(result.fm*0.95),
-      lt1_slow:dp(result.lt1*1.05), lt1_fast:dp(result.lt1*0.94),
-      moderate_slow:dp(result.lt2*1.15), moderate_fast:dp(result.lt2*1.02),
-      lt2_slow:dp(result.lt2*1.04), lt2_fast:dp(result.lt2*0.95),
-      vo2max_slow:dp(result.p20*1.15), vo2max_fast:dp(result.p20),
-      marathon_pace:dp(result.mp)
-    })
+    const { d12, d3, d20, weight, height, bf, ...z } = result
+    await onSave({ dist_12min:d12||null, dist_3min:d3, dist_20sec:d20||null,
+      weight_kg:weight, height_cm:height, body_fat_pct:bf, ...z })
     setSaved(true)
   }
 
@@ -942,7 +937,8 @@ function ZoneScreen({ userId, zones, onSave }) {
             <span style={{ color:'#6b7280' }}>Marathon Pace</span>
             <span style={{ color:'#3b82f6', fontWeight:'bold', fontSize:16, fontFamily:'monospace' }}>{zones.marathon_pace}</span>
           </div>
-          <div style={{ fontSize:11, color:'#4b5563', marginTop:6 }}>VO2max: {zones.vo2max?.toFixed(1)} | ทดสอบ: {zones.tested_at?new Date(zones.tested_at).toLocaleDateString('th-TH'):'-'}</div>
+          {zb('VO2max', zones.vo2max_slow, zones.vo2max_fast, '#a78bfa')}
+          <div style={{ fontSize:11, color:'#4b5563', marginTop:6 }}>VO2max: {zones.vo2max ? (+zones.vo2max).toFixed(1) : '-'} | ทดสอบ: {zones.tested_at?new Date(zones.tested_at).toLocaleDateString('th-TH'):'-'}</div>
         </div>
       )}
       <div style={{ background:'#111827', border:'1px solid #1f2937', borderRadius:12, padding:14, marginBottom:14 }}>
@@ -958,12 +954,14 @@ function ZoneScreen({ userId, zones, onSave }) {
       {result && (
         <div style={{ background:'#0d1117', border:'1px solid #374151', borderRadius:14, padding:16 }}>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
-            <div style={{ background:'#111827', borderRadius:10, padding:'10px 12px', textAlign:'center' }}><div style={{ fontSize:10, color:'#6b7280' }}>VO2max</div><div style={{ fontSize:24, fontWeight:'bold', color:'#3b82f6' }}>{result.vo2.toFixed(1)}</div></div>
-            <div style={{ background:'#111827', borderRadius:10, padding:'10px 12px', textAlign:'center' }}><div style={{ fontSize:10, color:'#6b7280' }}>Marathon Pace</div><div style={{ fontSize:22, fontWeight:'bold', color:'#a78bfa', fontFamily:'monospace' }}>{dp(result.mp)}</div></div>
+            <div style={{ background:'#111827', borderRadius:10, padding:'10px 12px', textAlign:'center' }}><div style={{ fontSize:10, color:'#6b7280' }}>VO2max</div><div style={{ fontSize:24, fontWeight:'bold', color:'#3b82f6' }}>{result.vo2max ? result.vo2max.toFixed(1) : '-'}</div></div>
+            <div style={{ background:'#111827', borderRadius:10, padding:'10px 12px', textAlign:'center' }}><div style={{ fontSize:10, color:'#6b7280' }}>Marathon Pace (ประมาณ)</div><div style={{ fontSize:22, fontWeight:'bold', color:'#a78bfa', fontFamily:'monospace' }}>{result.marathon_pace}</div></div>
           </div>
-          {zb('Easy / LT1', dp(result.fm*1.05), dp(result.lt1*0.94), '#22c55e')}
-          {zb('Moderate', dp(result.lt2*1.15), dp(result.lt2*1.02), '#f59e0b')}
-          {zb('LT2 Threshold', dp(result.lt2*1.04), dp(result.lt2*0.95), '#ef4444')}
+          {zb('Easy / LT1', result.fatmax_slow, result.lt1_fast, '#22c55e')}
+          {zb('Moderate', result.moderate_slow, result.moderate_fast, '#f59e0b')}
+          {zb('LT2 Threshold', result.lt2_slow, result.lt2_fast, '#ef4444')}
+          {zb('VO2max', result.vo2max_slow, result.vo2max_fast, '#a78bfa')}
+          <div style={{ fontSize:11, color:'#6b7280', marginTop:6 }}>Zone เป็นค่าประมาณจากการทดสอบ — ยืนยันด้วย HR (Easy ควรหายใจทางจมูกได้) และทดสอบซ้ำทุก 6–8 สัปดาห์</div>
           {saved ? <div style={{ background:'#0f2015', border:'1px solid #22c55e30', borderRadius:8, padding:10, fontSize:12, color:'#86efac', marginTop:10, textAlign:'center' }}>✅ บันทึก Zone แล้ว AI จะใช้ค่านี้</div> : <button onClick={handleSave} style={{ ...BTN('#22c55e'), width:'100%', marginTop:12 }}>💾 บันทึก Zone ลง Supabase</button>}
         </div>
       )}
@@ -1017,6 +1015,17 @@ function HistoryScreen({ history }) {
 }
 
 // ── SHARED ────────────────────────────────────────────────────────────────────
+function SafetyBanner({ flags }) {
+  if (!flags?.length) return null
+  const red = flags.some(f => f.level === 'red')
+  return <div style={{ background:red?'#1c0a0a':'#1c1007', border:`1px solid ${red?'#ef4444':'#78350f'}`, borderRadius:10, padding:'10px 12px', marginBottom:12 }}>
+    <div style={{ fontSize:13, fontWeight:'bold', color:red?'#fca5a5':'#fcd34d', marginBottom:4 }}>
+      {red ? '🚩 พบอาการที่ต้องระวัง — หยุดการซ้อมหนัก และปรึกษาแพทย์ก่อนกลับมาซ้อม' : '⚠️ สัญญาณเฝ้าระวัง — พิจารณาลดความหนัก/พักฟื้น'}
+    </div>
+    {flags.map((f, i) => <div key={i} style={{ fontSize:11, color:'#d1d5db' }}>• {f.day}: {f.text}</div>)}
+  </div>
+}
+
 function PhasePicker({ phase, onChange }) {
   const ph = phaseObj(phase), [open, setOpen] = useState(false)
   return <div style={{ position:'relative' }}>

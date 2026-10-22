@@ -138,6 +138,26 @@ export const suggestPhase = weeksLeft => {
   return 'base'
 }
 
+// ── แนวทางข้าม Phase ให้ตรง Race A: "ปฏิทินกำหนด Phase, ความพร้อมกำหนดปริมาณ" ─────
+// slack = สัปดาห์ที่เหลือเผื่อได้ หลังกันขั้นต่ำของ Phase ถัดไปไว้ (ค่าขั้นต่ำเป็นค่าตั้งต้นของระบบ ปรับได้)
+export const PHASE_ORDER = ['base', 'build', 'peak', 'taper']
+export const MIN_WEEKS = { build: 4, peak: 4, taper: 2 }
+
+export const phaseGuide = ({ raceDate, phase, vol = 0, target = 0, sessionsDone = 0, sessionsPlanned = 0 }) => {
+  const wl = weeksToRace(raceDate)
+  if (wl === null) return null
+  const cur = PHASE_ORDER.indexOf(phase)
+  const nextLeft = wl - 1                                   // สัปดาห์ที่เหลือหลังสัปดาห์นี้
+  const calNext = suggestPhase(nextLeft)                    // Phase ตามปฏิทินของสัปดาห์หน้า
+  const later = PHASE_ORDER.slice(cur + 1).reduce((a, p) => a + (MIN_WEEKS[p] || 0), 0)
+  const staySlack = nextLeft - later                        // ≥ 0 = อยู่ Phase เดิมต่อได้ โดย Phase หลังยังได้ขั้นต่ำ
+  const pct = target > 0 ? vol / target : null
+  const sessPct = sessionsPlanned ? sessionsDone / sessionsPlanned : null
+  const low = (pct !== null && pct < 0.7) || (sessPct !== null && sessPct < 0.6)
+  const behind = PHASE_ORDER.indexOf(calNext) > cur
+  return { weeksLeft: wl, nextLeft, calNext, staySlack, pct, sessPct, low, behind, needsDecision: behind && low }
+}
+
 // ── ตรวจโปรแกรมแบบกฎ (deterministic) ────────────────────────────────────────
 // คืนค่า [{rule, pass, level:'error'|'warn'|'info', comment}]
 export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, prevLongRun, maxLongRun, phase, weekNum, raceDate }) => {

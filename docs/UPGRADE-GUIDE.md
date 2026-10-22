@@ -46,3 +46,14 @@ supabase functions deploy coach
 ## ถ้ามีปัญหา
 - AI error 401/404 → function ยังไม่ deploy หรือ secret ยังไม่ตั้ง
 - ประวัติหาย → RLS ไม่ตรง user_id: ใช้ส่วน "ย้อนกลับ" ท้ายไฟล์ SQL แล้วแจ้งผม
+
+## อัปเดต ต.ค. 2569 (รอบ 2): Race A/B + Feedback รายวัน
+
+ต้องทำ **2 อย่าง ก่อน** ใช้ฟีเจอร์ใหม่ (merge เข้า `main` แล้วทำได้เลย ไม่กระทบของเดิม):
+
+1. **SQL** — Supabase → SQL Editor → วางไฟล์ `supabase/migrations/20261022_races_feedback.sql` → Run (เพิ่ม 5 คอลัมน์ใน `sessions`, รันซ้ำได้, ไม่แตะข้อมูลเดิม)
+2. **Edge Function** — Supabase → Edge Functions → `coach` → Code → วางไฟล์ `supabase/functions/coach/index.ts` ทั้งไฟล์ทับของเดิม → Deploy
+   (ไฟล์เดียว ไม่ต้องมี `prompts.ts` แล้ว)
+
+ถ้ายังไม่ทำข้อ 1: ติ๊ก "มีแข่ง"/ขอ feedback ได้ แต่จะไม่ถูกบันทึกถาวร (การบันทึกตารางปกติไม่เสีย)
+ถ้ายังไม่ทำข้อ 2: ปุ่ม "ส่งผลซ้อม & ขอ feedback" จะ error

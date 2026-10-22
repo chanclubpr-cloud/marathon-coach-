@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from './supabase.js'
-import { guessType, fixType, deriveZones, calcZones, ruleChecks, safetyFlags, checkAIPlan, weeksToRace, suggestPhase } from './coachRules.js'
+import { guessType, fixType, deriveZones, calcZones, ruleChecks, safetyFlags, checkAIPlan, weeksToRace, suggestPhase, raceOf, raceLine, dayChecks } from './coachRules.js'
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const PHASES = [
@@ -31,13 +31,15 @@ const DAY_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
 
 const phaseObj = id => PHASES.find(p=>p.id===id)||PHASES[0]
 const sessObj  = id => SESSION_TYPES.find(s=>s.id===id)||SESSION_TYPES[0]
+const sessOf   = d => d?.race?.on ? { ...sessObj(d.type), icon:'🏁', color:'#f43f5e' } : sessObj(d?.type)
+const parseFb  = v => { if (!v) return null; try { return typeof v === 'string' ? JSON.parse(v) : v } catch { return null } }
 const totalVol = w => (w.sessions||[]).reduce((s,d)=>s+(d.done?+d.distance||0:0),0)
 const doneSess = w => (w.sessions||[]).filter(d=>d.done&&d.type!=='rest').length
 const planSess = w => (w.sessions||[]).filter(d=>d.plan&&d.type!=='rest').length
 const avgRPE   = w => { const a=(w.sessions||[]).filter(d=>d.done&&d.rpe>0); return a.length?(a.reduce((s,d)=>s+ +d.rpe,0)/a.length).toFixed(1):'-' }
 const lrKm     = w => { const lr=(w.sessions||[]).find(d=>d.type==='longrun'&&d.done); return lr?+lr.distance||0:0 }
 
-const emptyDay  = (day,idx) => ({ day, dayIndex:idx, plan:'', type:'rest', done:false, distance:'', duration:'', pace:'', hr:'', rpe:0, feel:'', notes:'' })
+const emptyDay  = (day,idx) => ({ day, dayIndex:idx, plan:'', type:'rest', done:false, distance:'', duration:'', pace:'', hr:'', rpe:0, feel:'', notes:'', race:{ on:false, name:'', km:'', priority:'B' }, feedback:null })
 const emptyWeek = (num=1, phase='base') => ({ weekNum:num, phase, targetVolume:40, notes:'', sessions:DAYS.map((d,i)=>emptyDay(d,i)) })
 
 const IC = { background:'#0d1117', border:'1px solid #374151', borderRadius:8, color:'#f9fafb', padding:'11px 14px', fontSize:16, width:'100%', outline:'none', fontFamily:'inherit', boxSizing:'border-box' }
@@ -164,6 +166,8 @@ export default function App() {
                 rpe: found.rpe || 0,
                 feel: found.feel || '',
                 notes: found.notes || '',
+                race: { on: !!found.is_race, name: found.race_name || '', km: found.race_km || '', priority: found.race_priority || 'B' },
+                feedback: parseFb(found.coach_feedback),
               }
               return emptyDay(dayName, i)
             })
@@ -251,6 +255,15 @@ export default function App() {
         } else {
           await supabase.from('sessions').insert(sessionData)
         }
+        // Race B + feedback รายวัน: เขียนแยก — ถ้ายังไม่ได้รัน migration จะไม่กระทบการบันทึกหลัก
+        if (s.race?.on || s.feedback || s.raceTouched) {
+          const { error: xe } = await supabase.from('sessions').update({
+            is_race: !!s.race?.on, race_name: s.race?.name || '', race_km: +s.race?.km || null,
+            race_priority: s.race?.priority || 'B',
+            coach_feedback: s.feedback ? JSON.stringify(s.feedback) : ''
+          }).eq('week_id', wid).eq('day_name', s.day)
+          if (xe) console.warn('race/feedback ยังไม่ได้บันทึก (รัน migration 20261022 ก่อน):', xe.message)
+        }
       }
       setSaveMsg('บันทึกแล้ว ✓')
       setTimeout(() => setSaveMsg(''), 2000)
@@ -313,6 +326,7 @@ export default function App() {
       `Phase:${week.phase} W${week.weekNum} | วันแข่ง:${profile?.race_date || 'ไม่ได้ตั้ง'}${wl !== null ? ` (เหลือ ${wl} สัปดาห์ → phase ที่ควรเป็น: ${suggestPhase(wl)})` : ''}`,
       `Pace เป้ามาราธอน:${profile?.target_pace || '-'} | Long run สูงสุดที่ตั้งไว้:${profile?.max_long_run || '-'} km | Long run ยาวสุดใน 4 สัปดาห์:${prevLR || '-'} km`,
       `Volume สัปดาห์ก่อน:${prevVol.toFixed(1)} km | Down week ตามรอบ: ${week.weekNum % 4 === 0 ? 'ใช่' : 'ไม่ใช่'}`,
+      `Race ในสัปดาห์นี้: ${raceLine(week.sessions) || 'ไม่มี'} (Race A = มาราธอนเป้าหมายตามวันแข่งในโปรไฟล์; Race B = แข่งระหว่างทาง ใช้ซ้อม ไม่ใช่เป้า)`,
       zoneText(),
     ].join('\n')
   }
@@ -322,7 +336,7 @@ export default function App() {
     setValLoad(true); setValResult(null)
     const rules = ruleChecks({ ...ruleCtx(), sessions: week.sessions, targetVolume: week.targetVolume })
     try {
-      const planText = week.sessions.map(d => `${d.day}: ${d.plan || 'พัก'} [${d.type}]`).join('\n')
+      const planText = week.sessions.map(d => `${d.day}: ${d.plan || 'พัก'} [${fixType(d)}]${raceOf(d) ? ` 🏁 Race ${d.race.priority} ${d.race.name} ${d.race.km || ''}km` : ''}`).join('\n')
       const ruleText = rules.map(r => `${r.pass ? '✓' : '✗'} ${r.rule}: ${r.comment}`).join('\n')
       const ai = await callCoach('validate', `${factsText()}\nเป้า Volume:${week.targetVolume} km\n\nโปรแกรม:\n${planText}\n\nผลตรวจกฎจากระบบ:\n${ruleText}`)
       setValResult({ ...ai, ruleChecks: rules })
@@ -339,7 +353,7 @@ export default function App() {
     setAiLoad(true); setAiResult(null)
     try {
       const planText = week.sessions.map(d => `${d.day}: ${d.plan || (d.type === 'rest' ? 'พัก' : 'ไม่ได้วาง')}`).join('\n')
-      const actText  = week.sessions.map((d, i) => `${d.day}: ${d.done ? `✓ ${d.distance}km ${d.duration}min pace:${d.pace || '-'} HR:${d.hr || '-'} RPE:${d.rpe} "${d.feel}" ${d.notes ? `(${d.notes})` : ''}` : d.type === 'rest' ? 'พัก' : (partial && i > lastDone) ? 'ยังไม่ถึง' : 'ไม่ได้ทำ'}`).join('\n')
+      const actText  = week.sessions.map((d, i) => `${d.day}: ${d.done ? `✓ ${d.distance}km ${d.duration}min pace:${d.pace || '-'} HR:${d.hr || '-'} RPE:${d.rpe} "${d.feel}" ${d.notes ? `(${d.notes})` : ''}${raceOf(d) ? ` 🏁Race ${d.race.priority} ${d.race.name} ${d.race.km || ''}km` : ''}${d.feedback?.headline ? ` | โค้ชเคยบอกวันนั้น: ${d.feedback.headline}; ${d.feedback.next || ''}` : ''}` : d.type === 'rest' ? 'พัก' : (partial && i > lastDone) ? 'ยังไม่ถึง' : 'ไม่ได้ทำ'}`).join('\n')
       const prevText = history.slice(-4).map(w2 => `W${w2.weekNum}[${w2.phase}]: vol=${totalVol(w2).toFixed(1)}km RPE=${avgRPE(w2)} LR=${lrKm(w2)}km`).join('\n')
       const flags    = safetyFlags(week.sessions, week.notes)
       const flagText = flags.length ? flags.map(f => `[${f.level === 'red' ? 'อันตราย' : 'เฝ้าระวัง'}] ${f.day}: ${f.text}`).join('\n') : 'ไม่พบ'
@@ -348,6 +362,41 @@ export default function App() {
       setAiResult({ ...ai, planWarnings: checkAIPlan(ai, nextCtx), localFlags: flags })
     } catch (e) { setAiResult({ error: 'วิเคราะห์ไม่สำเร็จ: ' + e.message }) }
     setAiLoad(false)
+  }
+
+  // ── Feedback รายวัน: กด "ส่งผลซ้อม" แล้วโค้ชตอบเฉพาะวันนั้น ─────────────────
+  const [fbLoad, setFbLoad] = useState(null)
+  const sendDay = async (i) => {
+    const d0 = week.sessions[i]
+    if (!(+d0.distance || +d0.duration)) { alert('กรอกระยะทางหรือเวลาก่อนส่งผลซ้อม'); return }
+    setFbLoad(i)
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    const d = { ...d0, done: true }
+    let fb
+    try {
+      const checks = dayChecks(d, zones)
+      const flags  = safetyFlags([d])
+      const others = week.sessions.map(x => `${x.day}: ${x.plan || 'พัก'}${x.done ? ` ✓${x.distance}km RPE${x.rpe}` : ''}`).join('\n')
+      const input = `${factsText()}
+
+วันนี้: ${d.day}${raceOf(d) ? ` (🏁 Race ${d.race.priority} ${d.race.name} ${d.race.km || ''}km)` : ''}
+โจทย์: ${d.plan || '-'} [${fixType(d)}]
+ผลจริง: ${d.distance || '-'}km ${d.duration || '-'}min pace:${d.pace || '-'} HR:${d.hr || '-'} RPE:${d.rpe || '-'}
+ความรู้สึก: ${d.feel || '-'}
+โน้ต: ${d.notes || '-'}
+
+ผลตรวจจากระบบ:
+${checks.map(c => `- ${c.text}`).join('\n') || '- ไม่พบความผิดปกติเชิงตัวเลข'}
+สัญญาณความปลอดภัย: ${flags.length ? flags.map(f => `[${f.level}] ${f.text}`).join('; ') : 'ไม่พบ'}
+
+ตารางทั้งสัปดาห์:
+${others}`
+      fb = { ...(await callCoach('daily', input)), at: new Date().toISOString() }
+    } catch (e) { fb = { error: e.message, at: new Date().toISOString() } }
+    const next = { ...week, sessions: week.sessions.map((x, k) => k === i ? { ...d, feedback: fb.error ? x.feedback : fb, fbError: fb.error || null } : x) }
+    setWeek(next)
+    await doSave(next, weekId, user?.id)
+    setFbLoad(null)
   }
 
   const applyAIPlan = () => {
@@ -374,7 +423,7 @@ export default function App() {
 
   const screens = {
     plan:    <PlanScreen    week={week} onUpdate={updateWeek} valResult={valResult} valLoad={valLoad} onValidate={validatePlan} saving={saving} saveMsg={saveMsg} onManualSave={manualSave} volGuide={volGuide} />,
-    log:     <LogScreen     week={week} onUpdate={updateWeek} activeDay={activeDay} setActiveDay={setActiveDay} saving={saving} saveMsg={saveMsg} onManualSave={manualSave} />,
+    log:     <LogScreen     week={week} onUpdate={updateWeek} onSendDay={sendDay} fbLoad={fbLoad} activeDay={activeDay} setActiveDay={setActiveDay} saving={saving} saveMsg={saveMsg} onManualSave={manualSave} />,
     summary: <SummaryScreen week={week} profile={profile} aiResult={aiResult} aiLoad={aiLoad} onAnalyze={runAI} onApply={applyAIPlan} onArchive={() => archiveAndNext()} onGoLog={() => setTab('log')} />,
     volume:  <VolumeScreen  profile={profile} zones={zones} prevVol={history.length ? totalVol(history[history.length-1]) : 0} phase={week.phase} />,
     zone:    <ZoneScreen    userId={user?.id} zones={zones} onSave={saveZones} />,
@@ -402,7 +451,7 @@ export default function App() {
           { l:'Pace เป้า', v: profile?.target_pace || '-', c:'#22c55e' },
           { l:'Phase',     v: phaseObj(week.phase).label,   c: phaseObj(week.phase).color },
           { l:'สัปดาห์',   v: `W${week.weekNum}`,           c:'#3b82f6' },
-          { l:'วันแข่ง',   v: profile?.race_date ? new Date(profile.race_date).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}) : 'ยังไม่ตั้ง', c:'#f59e0b' },
+          { l:'Race A',     v: profile?.race_date ? new Date(profile.race_date).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}) : 'ยังไม่ตั้ง', c:'#f59e0b' },
         ].map(s => (
           <div key={s.l} style={{ flexShrink:0, textAlign:'center' }}>
             <div style={{ fontSize:11, color:'#6b7280', letterSpacing:1 }}>{s.l}</div>
@@ -491,6 +540,7 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
   const vc = { 'ผ่าน':'#22c55e', 'ปรับเล็กน้อย':'#f59e0b', 'ต้องแก้':'#ef4444' }
   const sc = s => s >= 80 ? '#22c55e' : s >= 60 ? '#f59e0b' : '#ef4444'
 
+  const updRace = (i, race) => onUpdate({ ...week, sessions: week.sessions.map((d, idx) => idx === i ? { ...d, race, raceTouched: true } : d) })
   const updDay = (i, plan) => {
     const sessions = week.sessions.map((d, idx) => idx === i ? { ...d, plan, type: guessType(plan) } : d)
     onUpdate({ ...week, sessions })
@@ -558,8 +608,8 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
 
       {/* Day Plans */}
       {week.sessions.map((d, i) => {
-        const so = sessObj(d.type)
-        const hasPlan = d.plan && d.plan.trim() && d.plan !== '-'
+        const so = sessOf(d)
+        const hasPlan = (d.plan && d.plan.trim() && d.plan !== '-') || d.race?.on
         const vday = valResult?.dayFeedback?.find(x => x.day === d.day)
         return (
           <div key={i} style={{ background:'#111827', border:`1px solid ${hasPlan ? so.color+'50' : '#1f2937'}`, borderRadius:12, marginBottom:8 }}>
@@ -571,6 +621,7 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
               <div style={{ flex:1 }}>
                 <div style={{ fontSize:16, color:so.color, fontWeight:'bold', marginBottom:3 }}>{d.day}</div>
                 <input value={d.plan} onChange={e => updDay(i, e.target.value)} placeholder="พัก / Easy 60 min / 400×12 rest1min ..." style={{ ...IC, padding:'10px 12px', fontSize:15, border:'none', background:'#1a2030' }} />
+                <RaceEditor race={d.race} onChange={r => updRace(i, r)} />
               </div>
               {d.done && <div style={{ fontSize:14 }}>✅</div>}
             </div>
@@ -633,7 +684,7 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
 }
 
 // ── LOG SCREEN ────────────────────────────────────────────────────────────────
-function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, onManualSave }) {
+function LogScreen({ week, onUpdate, onSendDay, fbLoad, activeDay, setActiveDay, saving, saveMsg, onManualSave }) {
   const updAct = (di, field, val) => {
     const sessions = week.sessions.map((d, i) => i === di ? { ...d, [field]: val } : d)
     onUpdate({ ...week, sessions })
@@ -659,7 +710,7 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
         </div>
         <div style={{ display:'flex', gap:5, marginTop:10, justifyContent:'center' }}>
           {week.sessions.map((d, i) => {
-            const so = sessObj(d.type)
+            const so = sessOf(d)
             return (
               <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:2 }}>
                 <div style={{ width:28, height:28, borderRadius:6, background:d.done?so.color+'30':'#1f2937', border:`1px solid ${d.done?so.color:'#374151'}`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, cursor:'pointer' }} onClick={() => setActiveDay(activeDay===i?null:i)}>
@@ -674,7 +725,7 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
 
       {/* Day Cards */}
       {week.sessions.map((d, i) => {
-        const so = sessObj(d.type), open = activeDay === i, hasPlan = d.plan && d.plan.trim() && d.plan !== '-'
+        const so = sessOf(d), open = activeDay === i, hasPlan = d.plan && d.plan.trim() && d.plan !== '-'
         return (
           <div key={i} style={{ background:'#111827', border:`1px solid ${d.done?so.color+'60':'#1f2937'}`, borderRadius:12, marginBottom:8, overflow:'hidden' }}>
             <div style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 14px', cursor:'pointer' }} onClick={() => setActiveDay(open?null:i)}>
@@ -683,6 +734,8 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
               <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ fontSize:17, fontWeight:'bold', color:d.done?so.color:'#d1d5db' }}>{d.day}</div>
                 {hasPlan && <div style={{ fontSize:11, color:'#374151', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginTop:1 }}>📋 {d.plan}</div>}
+                {d.race?.on && <div style={{ fontSize:11, color:'#f43f5e', marginTop:1 }}>🏁 Race {d.race.priority} {d.race.name} {d.race.km ? `${d.race.km}km` : ''}</div>}
+                {d.feedback?.headline && <div style={{ fontSize:11, color:'#93c5fd', marginTop:2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>💬 {d.feedback.headline}</div>}
                 {d.done && <div style={{ fontSize:11, color:'#6b7280', marginTop:2 }}>{[d.distance&&`${d.distance}km`, d.pace&&`${d.pace}/km`, d.hr&&`HR${d.hr}`, d.rpe>0&&`RPE${d.rpe}`].filter(Boolean).join(' · ')}</div>}
               </div>
               <span style={{ color:'#4b5563', fontSize:11, flexShrink:0 }}>{open?'▲':'▼'}</span>
@@ -697,7 +750,8 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
                     </button>
                   ))}
                 </div>
-                {hasPlan && <div style={{ background:'#0d1520', borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#93c5fd' }}><span style={{ color:'#4b5563' }}>แผน: </span>{d.plan}</div>}
+                <RaceEditor race={d.race} onChange={race => onUpdate({ ...week, sessions: week.sessions.map((x, k) => k === i ? { ...x, race, raceTouched: true } : x) })} />
+                {hasPlan && d.plan && <div style={{ background:'#0d1520', borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#93c5fd' }}><span style={{ color:'#4b5563' }}>แผน: </span>{d.plan}</div>}
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:10 }}>
                   {[{label:'ระยะทาง (km)',key:'distance',type:'number',ph:'0.0',step:'0.1'},{label:'เวลา (นาที)',key:'duration',type:'number',ph:'60'},{label:'Pace (min:sec/km)',key:'pace',type:'text',ph:'5:30'},{label:'HR เฉลี่ย (bpm)',key:'hr',type:'number',ph:'140'}].map(({label,key,type,ph,step}) => (
                     <div key={key}><div style={{ fontSize:10, color:'#6b7280', marginBottom:4 }}>{label}</div><input type={type} value={d[key]||''} step={step} onChange={e => updAct(i,key,e.target.value)} placeholder={ph} style={{ ...IC, padding:'8px 10px' }} /></div>
@@ -710,6 +764,10 @@ function LogScreen({ week, onUpdate, activeDay, setActiveDay, saving, saveMsg, o
                 </div>
                 <div style={{ marginBottom:10 }}><div style={{ fontSize:11, color:'#6b7280', marginBottom:4 }}>ความรู้สึก</div><input value={d.feel||''} onChange={e => updAct(i,'feel',e.target.value)} style={{ ...IC, padding:'8px 10px' }} placeholder="ขา HR ฟอร์ม ความเหนื่อย..." /></div>
                 <div><div style={{ fontSize:11, color:'#6b7280', marginBottom:4 }}>รายละเอียดเพิ่มเติม</div><textarea value={d.notes||''} onChange={e => updAct(i,'notes',e.target.value)} style={{ ...IC, height:60, resize:'none', fontSize:12 }} placeholder="Split time, รอบที่ทำได้, สภาพอากาศ..." /></div>
+                <button onClick={() => onSendDay(i)} disabled={fbLoad !== null} style={{ ...BTN(fbLoad === i ? '#1f2937' : so.color, fbLoad === i ? '#9ca3af' : '#000'), width:'100%', marginTop:12, padding:'12px 16px', fontSize:14 }}>
+                  {fbLoad === i ? '⏳ โค้ชกำลังอ่านผลซ้อม...' : d.feedback ? '🔄 ส่งผลซ้อมอีกครั้ง & ขอ feedback ใหม่' : '📤 ส่งผลซ้อมวันนี้ & ขอ feedback'}
+                </button>
+                <FeedbackCard fb={d.feedback} error={d.fbError} />
               </div>
             )}
           </div>
@@ -1018,6 +1076,44 @@ function HistoryScreen({ history }) {
 }
 
 // ── SHARED ────────────────────────────────────────────────────────────────────
+function RaceEditor({ race, onChange }) {
+  const r = race || { on:false, name:'', km:'', priority:'B' }
+  const set = patch => onChange({ ...r, ...patch })
+  return <div style={{ margin:'8px 0' }}>
+    <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, color:r.on?'#f43f5e':'#6b7280', cursor:'pointer' }}>
+      <input type="checkbox" checked={!!r.on} onChange={e => set({ on:e.target.checked })} style={{ accentColor:'#f43f5e' }} />🏁 วันนี้มีแข่ง
+    </label>
+    {r.on && <div style={{ display:'grid', gridTemplateColumns:'1fr 80px', gap:8, marginTop:8 }}>
+      <input value={r.name||''} onChange={e => set({ name:e.target.value })} placeholder="ชื่องาน เช่น Khonkaen100" style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
+      <input type="number" value={r.km||''} onChange={e => set({ km:e.target.value })} placeholder="km" style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
+      <div style={{ gridColumn:'1 / -1', display:'flex', gap:6, alignItems:'center' }}>
+        {[['B','Race B — แข่งระหว่างทาง (ซ้อม/ทดสอบ)'],['A','Race A — เป้าหมายหลัก']].map(([k,l]) =>
+          <button key={k} type="button" onClick={() => set({ priority:k })} style={{ flex:1, padding:'5px 6px', borderRadius:8, fontSize:10, fontFamily:'inherit', cursor:'pointer', border:`1px solid ${r.priority===k?'#f43f5e':'#374151'}`, background:r.priority===k?'#f43f5e20':'transparent', color:r.priority===k?'#f43f5e':'#6b7280' }}>{l}</button>)}
+      </div>
+    </div>}
+  </div>
+}
+
+function FeedbackCard({ fb, error }) {
+  if (!fb && !error) return null
+  const vc = { 'ตามแผน':'#22c55e', 'ทำได้ดี':'#22c55e', 'หนักเกินไป':'#f59e0b', 'เบากว่าแผน':'#3b82f6', 'ควรพัก/ระวัง':'#ef4444' }
+  const col = vc[fb?.verdict] || '#9ca3af'
+  return <div style={{ background:'#0d1520', border:`1px solid ${col}50`, borderRadius:10, padding:'10px 12px', marginTop:10 }}>
+    {error && <div style={{ fontSize:11, color:'#fca5a5', marginBottom:6 }}>ขอ feedback ไม่สำเร็จ: {error}</div>}
+    {fb && <>
+      <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:6 }}>
+        <span style={{ fontSize:10, fontWeight:'bold', color:'#000', background:col, borderRadius:99, padding:'1px 8px' }}>{fb.verdict}</span>
+        <span style={{ fontSize:10, color:'#4b5563' }}>💬 โค้ช{fb.at ? ` · ${new Date(fb.at).toLocaleString('th-TH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}` : ''}</span>
+      </div>
+      <div style={{ fontSize:13, color:'#f9fafb', fontWeight:'bold', marginBottom:6 }}>{fb.headline}</div>
+      {fb.safetyFlags?.length > 0 && <div style={{ fontSize:12, color:'#fca5a5', marginBottom:6 }}>🚩 {fb.safetyFlags.join(' · ')}</div>}
+      {fb.good?.map((g, i) => <div key={i} style={{ fontSize:12, color:'#86efac' }}>✓ {g}</div>)}
+      {fb.watch?.map((g, i) => <div key={i} style={{ fontSize:12, color:'#fcd34d' }}>⚠ {g}</div>)}
+      {fb.next && <div style={{ fontSize:12, color:'#93c5fd', marginTop:6 }}>→ {fb.next}</div>}
+    </>}
+  </div>
+}
+
 function SafetyBanner({ flags }) {
   if (!flags?.length) return null
   const red = flags.some(f => f.level === 'red')

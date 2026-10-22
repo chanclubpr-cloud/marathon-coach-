@@ -65,6 +65,31 @@ export const guessType = text => {
 // ซ่อมประเภทที่เคยถูกเดาผิดเป็น rest ทั้งที่มีโจทย์ซ้อม (ไม่แก้ข้อมูลในฐาน — คำนวณตอนอ่าน)
 export const fixType = d => (d?.plan && d.type === 'rest' ? guessType(d.plan) : d?.type)
 
+// ── Race (A = เป้าหลักจาก profile, B = แข่งระหว่างทาง ผูกกับวันในสัปดาห์) ──────
+export const raceOf = d => (d?.race?.on ? d.race : null)
+
+export const raceLine = (sessions = []) =>
+  sessions.filter(raceOf).map(d => {
+    const r = d.race
+    return `${d.day}: ${r.name || 'แข่ง'} ${r.km ? `${r.km} km ` : ''}[Race ${r.priority || 'B'}]`
+  }).join(' | ')
+
+// ── ตรวจผลซ้อมรายวัน (deterministic — แสดงทันที และส่งให้ AI เป็นข้อเท็จจริง) ──
+export const dayChecks = (d, zones) => {
+  const out = []
+  if (!d?.done) return out
+  const type = fixType(d)
+  const easyLike = ['easy', 'stride'].includes(type)
+  if (easyLike && +d.rpe >= 7) out.push({ level: 'warn', text: `วัน ${type} แต่ RPE ${d.rpe}/10 — หนักกว่าที่ควร` })
+  const sec = paceToSec(d.pace), lim = zones ? paceToSec(zones.lt1_fast) : null
+  if (easyLike && sec && lim && sec < lim - 10)
+    out.push({ level: 'warn', text: `Pace ${d.pace} เร็วกว่าโซน Easy (ควรช้ากว่า ${zones.lt1_fast}/km)` })
+  const planKm = parseFloat(((d.plan || '').match(/(\d+(?:\.\d+)?)\s*(km|กม)/i) || [])[1])
+  if (planKm && +d.distance && Math.abs(+d.distance - planKm) / planKm > 0.25)
+    out.push({ level: 'info', text: `ระยะจริง ${d.distance} km ต่างจากแผน ${planKm} km เกิน 25%` })
+  return out
+}
+
 // ── Zone จาก Speed Test ──────────────────────────────────────────────────────
 // ตัวคูณเทียบจาก "pace ของการวิ่ง 3 นาที" ปรับเทียบกับผลที่โค้ชคำนวณให้จริง
 // (3 นาที 674 m → Easy 7:40–6:40, Moderate 6:30–5:20, LT2 5:10–4:52)
@@ -117,8 +142,13 @@ export const suggestPhase = weeksLeft => {
 // คืนค่า [{rule, pass, level:'error'|'warn'|'info', comment}]
 export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, prevLongRun, maxLongRun, phase, weekNum, raceDate }) => {
   const out = []
-  const sessions = rawSessions.map(d => ({ ...d, type: fixType(d) }))
-  const planned = sessions.filter(d => d.plan && d.type !== 'rest')
+  // วันแข่งนับเป็น session หนัก (แข่ง ≥16 km หรือ Race A = เทียบ Long run)
+  const sessions = rawSessions.map(d => {
+    const r = raceOf(d)
+    return { ...d, _race: r, type: r ? ((+r.km >= 16 || r.priority === 'A') ? 'longrun' : 'tempo') : fixType(d) }
+  })
+  const raceKm = sessions.reduce((a, d) => a + (d._race ? +d._race.km || 0 : 0), 0)
+  const planned = sessions.filter(d => (d.plan || d._race) && d.type !== 'rest')
   const runDays = planned.length
 
   // 1) วันหนักติดกัน
@@ -138,20 +168,40 @@ export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, pr
   // 3) Volume เพิ่มไม่เกิน ~10% (และไม่เกิน 30% เด็ดขาด — Nielsen 2014)
   if (prevVolume > 0 && +targetVolume > 0) {
     const inc = (+targetVolume - prevVolume) / prevVolume
-    out.push({ rule: 'Volume เพิ่มอย่างค่อยเป็นค่อยไป', pass: inc <= 0.10, level: inc > 0.30 ? 'error' : 'warn',
-      comment: `${inc >= 0 ? '+' : ''}${Math.round(inc * 100)}% จากสัปดาห์ก่อน (${prevVolume.toFixed(0)} km)` })
+    const incEx = (+targetVolume - raceKm - prevVolume) / prevVolume   // ไม่นับระยะแข่ง
+    const raceNote = raceKm ? ` · ไม่รวมแข่ง ${raceKm} km = ${incEx >= 0 ? '+' : ''}${Math.round(incEx * 100)}%` : ''
+    out.push({ rule: 'Volume เพิ่มอย่างค่อยเป็นค่อยไป', pass: inc <= 0.10 || (raceKm > 0 && incEx <= 0.10),
+      level: raceKm ? 'info' : inc > 0.30 ? 'error' : 'warn',
+      comment: `${inc >= 0 ? '+' : ''}${Math.round(inc * 100)}% จากสัปดาห์ก่อน (${prevVolume.toFixed(0)} km)${raceNote}` })
   }
 
   // 4) Long run
-  const lr = sessions.find(d => d.type === 'longrun' && d.plan)
-  const lrKm = lr ? parseFloat((lr.plan.match(/(\d+(?:\.\d+)?)\s*(km|k\b|กม)/i) || [])[1]) : NaN
-  if (phase !== 'taper') out.push({ rule: 'มี Long Run', pass: !!lr, level: 'warn', comment: lr ? lr.plan : 'ยังไม่มี Long run — Key session ของมาราธอน' })
-  if (!isNaN(lrKm)) {
+  const lr = sessions.find(d => d.type === 'longrun' && (d.plan || d._race))
+  const lrKm = !lr ? NaN : lr._race && +lr._race.km ? +lr._race.km
+    : parseFloat(((lr.plan || '').match(/(\d+(?:\.\d+)?)\s*(km|k\b|กม)/i) || [])[1])
+  if (phase !== 'taper') out.push({ rule: 'มี Long Run', pass: !!lr, level: 'warn',
+    comment: lr ? (lr._race ? `นับวันแข่ง ${lr._race.name || ''} ${lr._race.km || ''} km` : lr.plan) : 'ยังไม่มี Long run — Key session ของมาราธอน' })
+  if (!isNaN(lrKm) && !lr._race) {   // ระยะแข่งไม่ใช่ Long run ซ้อม — ไม่เทียบเพดานเพิ่มทีละ 3 km
     const capByPrev = prevLongRun > 0 ? prevLongRun + 3 : null
     const over = (maxLongRun && lrKm > +maxLongRun) || (capByPrev && lrKm > capByPrev)
     out.push({ rule: 'Long Run เพิ่มทีละน้อย', pass: !over, level: 'warn',
       comment: `${lrKm} km${capByPrev ? ` (ครั้งก่อน ${prevLongRun} km แนะนำ ≤ ${capByPrev})` : ''}${maxLongRun ? ` · เพดาน ${maxLongRun} km` : ''}` })
   }
+
+  // 4.5) ก่อน/หลังวันแข่ง (Race B = mini-taper สั้นๆ ไม่ทิ้งแผน Race A)
+  sessions.forEach((d, i) => {
+    if (!d._race) return
+    const label = `Race ${d._race.priority || 'B'} ${d._race.name || d.day}`
+    const before = [sessions[i - 1], sessions[i - 2]].filter(x => x && x.plan && HARD_TYPES.includes(x.type) && !x._race)
+    out.push({ rule: `ก่อนแข่ง (${label})`, pass: !before.length, level: 'warn',
+      comment: before.length ? `มี session หนักใน 2 วันก่อนแข่ง: ${before.map(x => x.day).join(', ')} — ควรเป็น Easy/Stride สั้น` : '2 วันก่อนแข่งไม่มีวันหนัก' })
+    const next = sessions[i + 1]
+    if (next && next.plan && HARD_TYPES.includes(next.type))
+      out.push({ rule: `หลังแข่ง (${label})`, pass: false, level: 'warn', comment: `${next.day} หนักทันทีหลังแข่ง — ควรพัก/Easy ก่อน` })
+    const wl = weeksToRace(raceDate)
+    if (d._race.priority !== 'A' && wl !== null && wl > 0 && wl <= 3)
+      out.push({ rule: 'Race B ใกล้ Race A', pass: false, level: 'info', comment: `เหลือ ${wl} สัปดาห์ถึง Race A — ใช้เป็นซ้อมหรือ long run ไม่ควรลงเต็มแรง` })
+  })
 
   // 5) ความถี่สำหรับมาราธอน
   out.push({ rule: 'จำนวนวันวิ่ง', pass: runDays >= 4 || phase === 'taper', level: 'info',

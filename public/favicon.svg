@@ -1,12 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#0a0f1a"/>
-  <path d="M60 455h392" stroke="#22c55e" stroke-opacity=".35" stroke-width="10" stroke-linecap="round"/>
-  <circle cx="318" cy="128" r="36" fill="#4ade80"/>
-  <g fill="none" stroke="#4ade80" stroke-width="38" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M290 195L240 290"/>
-    <path d="M285 210L340 250L385 215"/>
-    <path d="M280 215L225 245L180 215"/>
-    <path d="M240 290L325 325L305 415"/>
-    <path d="M240 290L190 350L110 335"/>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs>
+<linearGradient id="g" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#86efac"/><stop offset="1" stop-color="#16a34a"/></linearGradient>
+<radialGradient id="bg" cx=".5" cy="1.1" r="1"><stop offset="0" stop-color="#14532d"/><stop offset="1" stop-color="#0a0f1a"/></radialGradient></defs>
+<rect width="512" height="512" rx="112" fill="url(#bg)"/>
+<g transform="translate(78 150) scale(1.5) skewX(-10)">
+<g fill="none" stroke-width="26" stroke-linejoin="miter" stroke-miterlimit="1.5"><path transform="translate(0 0)" d="M100 12H24Q4 12 4 32V108Q4 128 24 128H100" stroke="#fff"/><path transform="translate(125 0)" d="M10 140V0H62Q94 0 94 35Q94 70 62 70H10M58 70L96 140" stroke="url(#g)"/></g></g>
+<g transform="translate(78 392)"><rect width="356" height="14" rx="4" fill="url(#g)"/></g></svg>

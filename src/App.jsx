@@ -417,8 +417,7 @@ export default function App() {
 function LoginScreen({ onLogin }) {
   return (
     <div style={{ minHeight:'100vh', background:'linear-gradient(160deg,#0a0f1a,#0f1f10)', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:24 }}>
-      <img src="/logo.svg" alt="ChanRun" width={88} height={88} style={{ marginBottom:8 }} />
-      <div style={{ fontSize:28, fontWeight:'bold', color:'#22c55e', letterSpacing:3, marginBottom:4 }}>CHANRUN</div>
+      <img src="/logo-full.svg" alt="ChanRun" style={{ width:'100%', maxWidth:320, marginBottom:16 }} />
       <div style={{ color:'#6b7280', marginBottom:12, fontSize:13, textAlign:'center' }}>Self-Coached Marathon Platform</div>
       <div style={{ color:'#4b5563', marginBottom:40, fontSize:12, textAlign:'center' }}>วางแผน · บันทึก · วิเคราะห์ด้วย AI</div>
       <button onClick={onLogin} style={{ display:'flex', alignItems:'center', gap:12, background:'#fff', color:'#1f2937', border:'none', borderRadius:12, padding:'14px 28px', cursor:'pointer', fontWeight:'bold', fontSize:15, fontFamily:'inherit' }}>

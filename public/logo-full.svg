@@ -1,13 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 512">
-  <rect width="1100" height="512" rx="112" fill="#0a0f1a"/>
-  <g transform="translate(20 0)"><circle cx="318" cy="128" r="36" fill="#4ade80"/>
-  <g fill="none" stroke="#4ade80" stroke-width="38" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M290 195L240 290"/>
-    <path d="M285 210L340 250L385 215"/>
-    <path d="M280 215L225 245L180 215"/>
-    <path d="M240 290L325 325L305 415"/>
-    <path d="M240 290L190 350L110 335"/>
-  </g></g>
-  <text x="520" y="290" font-family="Arial Black,Arial,Helvetica,sans-serif" font-weight="900" font-size="150" fill="#fff">Chan</text>
-  <text x="520" y="415" font-family="Arial Black,Arial,Helvetica,sans-serif" font-weight="900" font-size="150" fill="#4ade80">Run</text>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 320"><defs>
+<linearGradient id="g" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#86efac"/><stop offset="1" stop-color="#16a34a"/></linearGradient>
+<radialGradient id="bg" cx=".5" cy="1.1" r="1"><stop offset="0" stop-color="#14532d"/><stop offset="1" stop-color="#0a0f1a"/></radialGradient></defs>
+<rect width="1160" height="320" rx="48" fill="url(#bg)"/>
+<g transform="translate(70 90) skewX(-10)"><g fill="url(#g)"><rect x="-30" y="30" width="60" height="12" rx="3"/><rect x="-10" y="64" width="40" height="12" rx="3"/><rect x="4" y="98" width="26" height="12" rx="3"/></g>
+<g fill="none" stroke-width="26" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="1.5" transform="translate(0 0)"><path transform="translate(100 0)" d="M100 12H24Q4 12 4 32V108Q4 128 24 128H100" stroke="#fff"/><path transform="translate(225 0)" d="M10 0V140M90 0V140M10 70H90" stroke="#fff"/><path transform="translate(350 0)" d="M0 140L50 0L100 140M20 96H80" stroke="#fff"/><path transform="translate(475 0)" d="M10 140V0L90 140V0" stroke="#fff"/><path transform="translate(600 0)" d="M10 140V0H62Q94 0 94 35Q94 70 62 70H10M58 70L96 140" stroke="url(#g)"/><path transform="translate(725 0)" d="M10 0V104Q10 128 50 128Q90 128 90 104V0" stroke="url(#g)"/><path transform="translate(850 0)" d="M10 140V0L90 140V0" stroke="url(#g)"/></g></g>
+<rect x="150" y="262" width="860" height="4" rx="2" fill="#22c55e" opacity=".5"/></svg>

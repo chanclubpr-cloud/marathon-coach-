@@ -330,16 +330,20 @@ export default function App() {
   const prevWeek  = history.length ? history[history.length - 1] : null
   const prevVol   = prevWeek ? totalVol(prevWeek) : 0
   const prevLR    = history.slice(-4).reduce((m, w2) => Math.max(m, lrKm(w2)), 0)
-  const ruleCtx   = () => ({ prevVolume: prevVol, prevLongRun: prevLR, maxLongRun: +profile?.max_long_run || null, phase: week.phase, weekNum: week.weekNum, raceDate: profile?.race_date })
+  const avgVol    = ws => ws.length ? ws.reduce((a, w2) => a + totalVol(w2), 0) / ws.length : 0
+  const isLowWeek = w2 => !!w2 && +w2.targetVolume > 0 && totalVol(w2) / +w2.targetVolume < 0.7
+  const normalVol = Math.max(prevVol, avgVol(history.slice(-4)))   // ระดับปกติ: กันกรณีสัปดาห์ก่อนหลุดแล้วดูเหมือน "เพิ่มกระโดด"
+  const ruleCtx   = () => ({ prevVolume: normalVol, prevLow: isLowWeek(prevWeek), prevLongRun: prevLR, maxLongRun: +profile?.max_long_run || null, phase: week.phase, weekNum: week.weekNum, raceDate: profile?.race_date })
   const zoneText  = () => zones
     ? `Zone (จาก Speed Test): Easy/LT1 ${zones.fatmax_slow}-${zones.lt1_fast} | Moderate ${zones.moderate_slow}-${zones.moderate_fast} | LT2 ${zones.lt2_slow}-${zones.lt2_fast} | VO2max ${zones.vo2max_slow}-${zones.vo2max_fast} | MP(ประมาณ) ${zones.marathon_pace}`
     : 'Zone: ยังไม่ได้ทำ Speed Test — ใช้ RPE/HR'
   const factsText = () => {
     const wl = weeksToRace(profile?.race_date)
     return [
+      `บริบทนักวิ่ง: มือสมัครเล่น ทำงานประจำ (พยาบาล) ขาดบ้างครบบ้างเป็นเรื่องปกติ — ประเมินจากแนวโน้ม 3–4 สัปดาห์ ไม่ตัดสินจากสัปดาห์เดียว ไม่ตำหนิ ให้ดูเหตุผลจากโน้ต และวางแผนให้ทำได้จริง`,
       `Phase:${week.phase} W${week.weekNum} | วันแข่ง:${profile?.race_date || 'ไม่ได้ตั้ง'}${wl !== null ? ` (เหลือ ${wl} สัปดาห์ → phase ที่ควรเป็น: ${suggestPhase(wl)})` : ''}`,
       `Pace เป้ามาราธอน:${profile?.target_pace || '-'} | Long run สูงสุดที่ตั้งไว้:${profile?.max_long_run || '-'} km | Long run ยาวสุดใน 4 สัปดาห์:${prevLR || '-'} km`,
-      `Volume สัปดาห์ก่อน:${prevVol.toFixed(1)} km | Down week ตามรอบ: ${week.weekNum % 4 === 0 ? 'ใช่' : 'ไม่ใช่'}`,
+      `Volume สัปดาห์ก่อน:${prevVol.toFixed(1)} km (เฉลี่ย 4 สัปดาห์ ${avgVol(history.slice(-4)).toFixed(1)} km) | Down week ตามรอบ: ${week.weekNum % 4 === 0 ? 'ใช่' : 'ไม่ใช่'}`,
       `Race ในสัปดาห์นี้: ${raceLine(week.sessions) || 'ไม่มี'} (Race A = มาราธอนเป้าหมายตามวันแข่งในโปรไฟล์; Race B = แข่งระหว่างทาง ใช้ซ้อม ไม่ใช่เป้า)`,
       `Race A (เป้าหมายหลัก): ${profile?.race_name || 'มาราธอน'} ${profile?.race_date || ''}`,
       `Race B ที่จะมาถึง: ${upcomingRaces(profile).slice(0, 4).map(r => `${r.name || 'แข่ง'} ${r.km ? r.km + 'km ' : ''}${r.date} (อีก ${Math.ceil((r.d - todayD()) / 604800000)} สัปดาห์)`).join(' | ') || 'ไม่มี'}`,
@@ -362,15 +366,21 @@ export default function App() {
 
   // ── AI Analysis ───────────────────────────────────────────────────────────
   const buildGuide = () => phaseGuide({
-    raceDate: profile?.race_date, phase: week.phase, vol: totalVol(week), target: +week.targetVolume,
-    sessionsDone: doneSess(week), sessionsPlanned: planSess(week)
+    raceDate: profile?.race_date, phase: week.phase,
+    weeks: [...history.slice(-2), week].map(w2 => ({ vol: totalVol(w2), target: +w2.targetVolume, done: doneSess(w2), planned: planSess(w2) }))
   })
   const guideText = (g, choice) => !g ? '' : `\nข้อกำหนด Phase ให้ตรง Race A (จากระบบ — ยึดตามนี้):
 - เหลือ ${g.weeksLeft} สัปดาห์ถึง Race A · Phase ตามปฏิทินของสัปดาห์หน้า: ${g.calNext} · slack (เผื่ออยู่ Phase เดิม): ${g.staySlack} สัปดาห์
-- ความพร้อมสัปดาห์นี้: volume ${g.pct === null ? '-' : Math.round(g.pct * 100) + '%'} ของเป้า, session ${g.sessPct === null ? '-' : Math.round(g.sessPct * 100) + '%'} ของแผน
-- หลัก: ปฏิทินกำหนด Phase ความพร้อมกำหนดปริมาณ ห้ามซ้ำ Phase เดิมเองเมื่อ slack < 0; ซ้อมน้อยให้ "ขึ้น Phase แบบย่อส่วน" (เริ่ม volume จากที่ทำได้จริง เพิ่ม ≤10%, เก็บ Long run และงานหลักของ Phase ไว้ก่อน ตัด Easy สั้นก่อน, ไม่ชดเชยซ้อนของที่พลาด)
-${choice === 'advance' ? '- ผู้ใช้เลือกแล้ว: ขึ้น Phase ตามปฏิทินแบบย่อส่วน → nextPhase = ' + g.calNext
+- ความพร้อม: สัปดาห์นี้ volume ${pctTxt(g.pct)} session ${pctTxt(g.sessPct)} · แนวโน้ม 2–3 สัปดาห์ volume ${pctTxt(g.trendPct)} session ${pctTxt(g.trendSess)}
+- หลัก: ปฏิทินกำหนด Phase ความพร้อมกำหนดปริมาณ ขึ้นทีละ Phase ไม่ข้าม
+  · หลุดสัปดาห์เดียวแต่แนวโน้มดี → เดินตามแผนต่อ กลับสู่ระดับปกติได้เลย ไม่ต้องถอย ไม่ชดเชย
+  · สัปดาห์ที่ซ้อมได้น้อย ถือว่าได้พักไปแล้ว ไม่ต้องจัด Down week ซ้ำ
+  · แนวโน้มน้อยและยังมี slack → อยู่ Phase เดิมได้; ไม่มี slack → ห้ามซ้ำเอง ให้ขึ้นแบบย่อส่วน (volume เริ่มจากที่ทำได้จริง เพิ่ม ≤10%, เก็บ Long run + งานหลักของ Phase, ตัด Easy สั้นก่อน)
+  · Phase ที่ควรขึ้นถัดไป (ทีละขั้น): ${g.advanceTo}
+${choice === 'advance' ? '- ผู้ใช้เลือกแล้ว: ขึ้น Phase แบบย่อส่วน → nextPhase = ' + g.advanceTo
   : choice === 'stay' ? '- ผู้ใช้เลือกแล้ว: อยู่ Phase เดิมอีก 1 สัปดาห์ → nextPhase = ' + week.phase + (g.staySlack < 0 ? ` (เตือน: เวลาเหลือไม่พอสำหรับ Phase ถัดไปตามขั้นต่ำ ขาด ${-g.staySlack} สัปดาห์ — ให้ระบุความเสี่ยงนี้ใน reason)` : '') : ''}`
+
+  const pctTxt = v => v === null || v === undefined ? '-' : Math.round(v * 100) + '%'
 
   const runAI = async (choice) => {
     if (typeof choice !== 'string') choice = null
@@ -390,12 +400,12 @@ ${choice === 'advance' ? '- ผู้ใช้เลือกแล้ว: ข�
       setAskPhase(false)
       const flagText = flags.length ? flags.map(f => `[${f.level === 'red' ? 'อันตราย' : 'เฝ้าระวัง'}] ${f.day}: ${f.text}`).join('\n') : 'ไม่พบ'
       const ai = await callCoach('analyze', `${factsText()}\n\nแผน:\n${planText}\n\nผลจริง:\n${actText}\n${partial ? `**สัปดาห์ยังไม่จบ** (บันทึกถึงวัน${DAYS[lastDone]}) — วันที่เขียนว่า "ยังไม่ถึง" ห้ามนับเป็นการข้าม/ไม่ทำ และห้ามสรุป volume ต่ำจากตัวเลขบางส่วน ประเมินเฉพาะที่ผ่านมา แล้วร่างแผนสัปดาห์หน้าโดยสมมติว่าวันที่เหลือทำตามแผน\n` : ''}Vol จริง:${totalVol(week).toFixed(1)}/${week.targetVolume}km RPE เฉลี่ย:${avgRPE(week)} LR:${lrKm(week)}km\nโน้ตสัปดาห์:${week.notes || '-'}\n\nสัญญาณที่ระบบตรวจพบ:\n${flagText}\n\nประวัติ 4 สัปดาห์:\n${prevText || 'ยังไม่มี'}${guideText(guide, choice)}`)
-      if (choice === 'advance') ai.nextPhase = guide.calNext
+      if (choice === 'advance') ai.nextPhase = guide.advanceTo
       if (choice === 'stay') ai.nextPhase = week.phase
-      const nextCtx = { ...ruleCtx(), prevVolume: partial ? (+week.targetVolume || prevVol) : (totalVol(week) || prevVol), prevLongRun: Math.max(prevLR, lrKm(week)) }
+      const nextCtx = { ...ruleCtx(), prevLow: !partial && isLowWeek(week), prevVolume: partial ? (+week.targetVolume || normalVol) : Math.max(totalVol(week), avgVol([...history.slice(-3), week])), prevLongRun: Math.max(prevLR, lrKm(week)) }
       const warns = checkAIPlan(ai, nextCtx)
-      if (guide && !choice && guide.staySlack < 0 && ai.nextPhase && PHASE_IDX(ai.nextPhase) < PHASE_IDX(guide.calNext))
-        warns.push({ rule: 'Phase ต่ำกว่าปฏิทิน', pass: false, level: 'warn', comment: `AI เสนอ ${ai.nextPhase} แต่เหลือ ${guide.weeksLeft} สัปดาห์ถึง Race A และไม่มี slack (${guide.staySlack}) — ควรขึ้น ${guide.calNext} (ย่อส่วนได้)` })
+      if (guide && !choice && guide.staySlack < 0 && ai.nextPhase && PHASE_IDX(ai.nextPhase) < PHASE_IDX(guide.advanceTo))
+        warns.push({ rule: 'Phase ต่ำกว่าปฏิทิน', pass: false, level: 'warn', comment: `AI เสนอ ${ai.nextPhase} แต่เหลือ ${guide.weeksLeft} สัปดาห์ถึง Race A และไม่มี slack (${guide.staySlack}) — ควรขึ้น ${guide.advanceTo} (ย่อส่วนได้)` })
       setAiResult({ ...ai, planWarnings: warns, localFlags: flags, guide })
     } catch (e) { setAiResult({ error: 'วิเคราะห์ไม่สำเร็จ: ' + e.message }) }
     setAiLoad(false)
@@ -883,10 +893,10 @@ function SummaryScreen({ week, profile, guide, askPhase, aiResult, aiLoad, onAna
       {askPhase && !aiResult && guide && <div style={{ background:'#1c1007', border:'1px solid #f59e0b', borderRadius:12, padding:14, marginBottom:14 }}>
         <div style={{ fontSize:14, fontWeight:'bold', color:'#fcd34d', marginBottom:6 }}>⚠️ ต้องตัดสินใจเรื่อง Phase ก่อน</div>
         <div style={{ fontSize:12, color:'#d1d5db', lineHeight:1.6, marginBottom:10 }}>
-          สัปดาห์นี้ทำได้ {guide.pct === null ? '-' : Math.round(guide.pct * 100)}% ของเป้า ({doneSess(week)}/{planSess(week)} session) แต่ปฏิทินบอกว่าสัปดาห์หน้าควรเป็น <b>{phaseObj(guide.calNext).label}</b> (เหลือ {guide.weeksLeft} สัปดาห์ถึง Race A)
+          ช่วง 2–3 สัปดาห์นี้ซ้อมได้ราว {guide.trendPct === null ? '-' : Math.round(guide.trendPct * 100)}% ของเป้า และไม่มีเวลาเผื่อแล้ว (เหลือ {guide.weeksLeft} สัปดาห์ถึง Race A) — ปกติช่วงนี้ควรเข้า <b>{phaseObj(guide.calNext).label}</b>
         </div>
         <button onClick={() => onAnalyze('advance')} disabled={aiLoad} style={{ ...BTN('#22c55e'), width:'100%', marginBottom:8, padding:'12px 14px', fontSize:13, textAlign:'left' }}>
-          ➡️ ขึ้น {phaseObj(guide.calNext).label} แบบย่อส่วน<div style={{ fontSize:11, fontWeight:'normal', marginTop:2 }}>ตรงปฏิทิน Race A · เริ่ม volume จากที่ทำได้จริง เพิ่ม ≤10% · ไม่ชดเชยของที่พลาด</div>
+          ➡️ ขึ้น {phaseObj(guide.advanceTo).label} แบบย่อส่วน<div style={{ fontSize:11, fontWeight:'normal', marginTop:2 }}>ตรงปฏิทิน Race A · เริ่ม volume จากที่ทำได้จริง เพิ่ม ≤10% · ไม่ชดเชยของที่พลาด</div>
         </button>
         <button onClick={() => onAnalyze('stay')} disabled={aiLoad} style={{ ...BTN('#1f2937', '#f9fafb'), width:'100%', padding:'12px 14px', fontSize:13, textAlign:'left' }}>
           🔁 อยู่ {phaseObj(week.phase).label} อีก 1 สัปดาห์<div style={{ fontSize:11, fontWeight:'normal', marginTop:2, color:guide.staySlack >= 0 ? '#86efac' : '#fcd34d' }}>{guide.staySlack >= 0 ? `ทำได้ — ยังมีเวลาเผื่อ ${guide.staySlack} สัปดาห์` : `เสี่ยง — เวลาไม่พอสำหรับ Phase ถัดไปตามขั้นต่ำ (ขาด ${-guide.staySlack} สัปดาห์)`}</div>
@@ -904,7 +914,7 @@ function SummaryScreen({ week, profile, guide, askPhase, aiResult, aiLoad, onAna
               {d.done ? <div style={{ paddingLeft:22 }}>
                 <div style={{ fontSize:11, color:'#86efac' }}>✓ {[d.distance&&`${d.distance}km`, d.pace&&`Pace ${d.pace}`, d.hr&&`HR ${d.hr}`, d.rpe>0&&`RPE ${d.rpe}`].filter(Boolean).join(' · ')}</div>
                 {d.feel && <div style={{ fontSize:11, color:'#9ca3af', marginTop:2 }}>💬 "{d.feel}"</div>}
-              </div> : hasPlan&&d.type!=='rest' ? <div style={{ fontSize:11, color:'#7f1d1d', paddingLeft:22 }}>✗ ไม่ได้ทำ</div> : null}
+              </div> : hasPlan&&d.type!=='rest' ? <div style={{ fontSize:11, color:'#6b7280', paddingLeft:22 }}>— ข้าม (ไม่ต้องชดเชย)</div> : null}
             </div>
           )
         })}

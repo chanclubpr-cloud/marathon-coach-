@@ -143,7 +143,12 @@ export const suggestPhase = weeksLeft => {
 export const PHASE_ORDER = ['base', 'build', 'peak', 'taper']
 export const MIN_WEEKS = { build: 4, peak: 4, taper: 2 }
 
-export const phaseGuide = ({ raceDate, phase, vol = 0, target = 0, sessionsDone = 0, sessionsPlanned = 0 }) => {
+// ความพร้อมดูจาก "แนวโน้ม" 2–3 สัปดาห์ล่าสุด ไม่ใช่สัปดาห์เดียว — นักวิ่งที่ทำงานประจำขาดบ้างครบบ้างเป็นเรื่องปกติ
+// weeks = [{ vol, target, done, planned }, ...] เรียงเก่า→ใหม่ ตัวสุดท้ายคือสัปดาห์นี้
+const ratio = (a, b) => (b > 0 ? Math.min(1, a / b) : null)
+const mean = xs => { const v = xs.filter(x => x !== null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null }
+
+export const phaseGuide = ({ raceDate, phase, weeks = [] }) => {
   const wl = weeksToRace(raceDate)
   if (wl === null) return null
   const cur = PHASE_ORDER.indexOf(phase)
@@ -151,16 +156,26 @@ export const phaseGuide = ({ raceDate, phase, vol = 0, target = 0, sessionsDone 
   const calNext = suggestPhase(nextLeft)                    // Phase ตามปฏิทินของสัปดาห์หน้า
   const later = PHASE_ORDER.slice(cur + 1).reduce((a, p) => a + (MIN_WEEKS[p] || 0), 0)
   const staySlack = nextLeft - later                        // ≥ 0 = อยู่ Phase เดิมต่อได้ โดย Phase หลังยังได้ขั้นต่ำ
-  const pct = target > 0 ? vol / target : null
-  const sessPct = sessionsPlanned ? sessionsDone / sessionsPlanned : null
-  const low = (pct !== null && pct < 0.7) || (sessPct !== null && sessPct < 0.6)
+  const recent = weeks.slice(-3)
+  const last = recent[recent.length - 1] || {}
+  const pct = ratio(last.vol, last.target), sessPct = ratio(last.done, last.planned)       // สัปดาห์นี้
+  const trendPct = mean(recent.map(w => ratio(w.vol, w.target)))                          // แนวโน้ม 2–3 สัปดาห์
+  const trendSess = mean(recent.map(w => ratio(w.done, w.planned)))
+  const weekLow = (pct !== null && pct < 0.7) || (sessPct !== null && sessPct < 0.6)
+  const trendLow = (trendPct !== null && trendPct < 0.7) || (trendSess !== null && trendSess < 0.6)
   const behind = PHASE_ORDER.indexOf(calNext) > cur
-  return { weeksLeft: wl, nextLeft, calNext, staySlack, pct, sessPct, low, behind, needsDecision: behind && low }
+  // ขึ้นทีละขั้น ไม่กระโดดข้าม Phase (เช่น Base → Build-ย่อส่วน แม้ปฏิทินบอก Peak)
+  const advanceTo = behind ? PHASE_ORDER[cur + 1] : phase
+  // ถามผู้ใช้เฉพาะเมื่อ: ปฏิทินให้ขึ้น + แนวโน้มซ้อมน้อยจริง + ไม่มีเวลาเผื่อแล้ว
+  // (สัปดาห์เดียวที่หลุด หรือยังมี slack → โค้ชตัดสินเองได้ ไม่ต้องรบกวน)
+  return { weeksLeft: wl, nextLeft, calNext, advanceTo, staySlack, pct, sessPct, trendPct, trendSess,
+    weekLow, trendLow, behind, needsDecision: behind && trendLow && staySlack < 0 }
 }
 
 // ── ตรวจโปรแกรมแบบกฎ (deterministic) ────────────────────────────────────────
 // คืนค่า [{rule, pass, level:'error'|'warn'|'info', comment}]
-export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, prevLongRun, maxLongRun, phase, weekNum, raceDate }) => {
+// prevVolume = "ระดับปกติ" (สูงสุดของสัปดาห์ก่อน กับ ค่าเฉลี่ย 4 สัปดาห์) — กลับสู่ระดับเดิมหลังสัปดาห์ที่หลุดไม่ใช่การ "เพิ่มกระโดด"
+export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, prevLow, prevLongRun, maxLongRun, phase, weekNum, raceDate }) => {
   const out = []
   // วันแข่งนับเป็น session หนัก (แข่ง ≥16 km หรือ Race A = เทียบ Long run)
   const sessions = rawSessions.map(d => {
@@ -192,7 +207,7 @@ export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, pr
     const raceNote = raceKm ? ` · ไม่รวมแข่ง ${raceKm} km = ${incEx >= 0 ? '+' : ''}${Math.round(incEx * 100)}%` : ''
     out.push({ rule: 'Volume เพิ่มอย่างค่อยเป็นค่อยไป', pass: inc <= 0.10 || (raceKm > 0 && incEx <= 0.10),
       level: raceKm ? 'info' : inc > 0.30 ? 'error' : 'warn',
-      comment: `${inc >= 0 ? '+' : ''}${Math.round(inc * 100)}% จากสัปดาห์ก่อน (${prevVolume.toFixed(0)} km)${raceNote}` })
+      comment: `${inc >= 0 ? '+' : ''}${Math.round(inc * 100)}% จากระดับปกติ (${prevVolume.toFixed(0)} km)${raceNote}` })
   }
 
   // 4) Long run
@@ -228,7 +243,8 @@ export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, pr
     comment: `${runDays} วัน${runDays < 4 ? ' — มาราธอนควร ≥ 4 วัน/สัปดาห์' : ''}` })
 
   // 6) Down week / Phase ตามวันแข่ง
-  if (weekNum && weekNum % 4 === 0 && prevVolume > 0 && +targetVolume >= prevVolume)
+  // สัปดาห์ก่อนซ้อมได้น้อยอยู่แล้ว = ได้พักไปโดยปริยาย ไม่ต้องลดซ้ำ
+  if (weekNum && weekNum % 4 === 0 && !prevLow && prevVolume > 0 && +targetVolume >= prevVolume)
     out.push({ rule: 'Down Week', pass: false, level: 'info', comment: `W${weekNum} ควรลด Volume ~20–30% เพื่อ Supercompensation` })
   const sp = suggestPhase(weeksToRace(raceDate))
   if (sp && sp !== phase)

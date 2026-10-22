@@ -32,6 +32,10 @@ const DAY_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
 const phaseObj = id => PHASES.find(p=>p.id===id)||PHASES[0]
 const sessObj  = id => SESSION_TYPES.find(s=>s.id===id)||SESSION_TYPES[0]
 const sessOf   = d => d?.race?.on ? { ...sessObj(d.type), icon:'🏁', color:'#f43f5e' } : sessObj(d?.type)
+const parseD   = str => { const [y,m,d] = String(str).split('-').map(Number); return new Date(y, m-1, d) }
+const todayD   = () => { const t = new Date(); t.setHours(0,0,0,0); return t }
+const upcomingRaces = profile => (profile?.races || []).filter(r => r.date)
+  .map(r => ({ ...r, d: parseD(r.date) })).filter(r => r.d >= todayD()).sort((a, b) => a.d - b.d)
 const parseFb  = v => { if (!v) return null; try { return typeof v === 'string' ? JSON.parse(v) : v } catch { return null } }
 const totalVol = w => (w.sessions||[]).reduce((s,d)=>s+(d.done?+d.distance||0:0),0)
 const doneSess = w => (w.sessions||[]).filter(d=>d.done&&d.type!=='rest').length
@@ -219,7 +223,11 @@ export default function App() {
     }
     const { error } = await supabase.from('profiles').upsert(upsertData, { onConflict: 'user_id' })
     if (error) { console.error('saveGoal error', error); return }
-    setProfile(upsertData)
+    // Race A ชื่อ + รายการ Race B: เขียนแยก — ถ้ายังไม่รัน migration 20261023 จะไม่กระทบการบันทึก Goal
+    const races = (goalData.races || []).filter(r => r.name || r.date)
+    const { error: re } = await supabase.from('profiles').update({ races, race_name: goalData.raceName || '' }).eq('user_id', uid)
+    if (re) console.warn('Race A/B ยังไม่ได้บันทึก (รัน migration 20261023 ก่อน):', re.message)
+    setProfile({ ...upsertData, races, race_name: goalData.raceName || '' })
     if (!weekId) {
       const { data: nw } = await supabase.from('weeks')
         .insert({ user_id: uid, week_num: +goalData.weekNum||1, phase: goalData.phase||'base', target_volume: 40, notes: '' })
@@ -327,6 +335,8 @@ export default function App() {
       `Pace เป้ามาราธอน:${profile?.target_pace || '-'} | Long run สูงสุดที่ตั้งไว้:${profile?.max_long_run || '-'} km | Long run ยาวสุดใน 4 สัปดาห์:${prevLR || '-'} km`,
       `Volume สัปดาห์ก่อน:${prevVol.toFixed(1)} km | Down week ตามรอบ: ${week.weekNum % 4 === 0 ? 'ใช่' : 'ไม่ใช่'}`,
       `Race ในสัปดาห์นี้: ${raceLine(week.sessions) || 'ไม่มี'} (Race A = มาราธอนเป้าหมายตามวันแข่งในโปรไฟล์; Race B = แข่งระหว่างทาง ใช้ซ้อม ไม่ใช่เป้า)`,
+      `Race A (เป้าหมายหลัก): ${profile?.race_name || 'มาราธอน'} ${profile?.race_date || ''}`,
+      `Race B ที่จะมาถึง: ${upcomingRaces(profile).slice(0, 4).map(r => `${r.name || 'แข่ง'} ${r.km ? r.km + 'km ' : ''}${r.date} (อีก ${Math.ceil((r.d - todayD()) / 604800000)} สัปดาห์)`).join(' | ') || 'ไม่มี'}`,
       zoneText(),
     ].join('\n')
   }
@@ -422,7 +432,7 @@ ${others}`
   const volGuide = getVolumeGuide(week.phase, week.weekNum, history.length ? totalVol(history[history.length-1]) : 0)
 
   const screens = {
-    plan:    <PlanScreen    week={week} onUpdate={updateWeek} valResult={valResult} valLoad={valLoad} onValidate={validatePlan} saving={saving} saveMsg={saveMsg} onManualSave={manualSave} volGuide={volGuide} />,
+    plan:    <PlanScreen    profile={profile} week={week} onUpdate={updateWeek} valResult={valResult} valLoad={valLoad} onValidate={validatePlan} saving={saving} saveMsg={saveMsg} onManualSave={manualSave} volGuide={volGuide} />,
     log:     <LogScreen     week={week} onUpdate={updateWeek} onSendDay={sendDay} fbLoad={fbLoad} activeDay={activeDay} setActiveDay={setActiveDay} saving={saving} saveMsg={saveMsg} onManualSave={manualSave} />,
     summary: <SummaryScreen week={week} profile={profile} aiResult={aiResult} aiLoad={aiLoad} onAnalyze={runAI} onApply={applyAIPlan} onArchive={() => archiveAndNext()} onGoLog={() => setTab('log')} />,
     volume:  <VolumeScreen  profile={profile} zones={zones} prevVol={history.length ? totalVol(history[history.length-1]) : 0} phase={week.phase} />,
@@ -489,6 +499,8 @@ function GoalScreen({ profile, user, onSave, isEdit, onCancel }) {
     phase:      profile?.phase       || 'base',
     maxLongRun: profile?.max_long_run|| 15,
     weekNum:    profile?.week_num    || 1,
+    raceName:   profile?.race_name   || '',
+    races:      Array.isArray(profile?.races) ? profile.races : [],
   })
   const s = (k, v) => setF(x => ({ ...x, [k]: v }))
   const ph = phaseObj(f.phase)
@@ -506,9 +518,26 @@ function GoalScreen({ profile, user, onSave, isEdit, onCancel }) {
           <div style={{ fontSize:11, color:'#4b5563', marginTop:4 }}>พิมพ์เป็น mm:ss เช่น 5:30</div>
         </div>
         <div style={{ marginBottom:16 }}>
-          <div style={{ color:'#9ca3af', fontSize:12, marginBottom:6 }}>📅 วันแข่ง</div>
+          <div style={{ color:'#9ca3af', fontSize:12, marginBottom:6 }}>🏆 Race A — มาราธอนเป้าหมายหลัก</div>
+          <input value={f.raceName} onChange={e => s('raceName', e.target.value)} placeholder="ชื่องาน เช่น Bangkok Marathon" style={{ ...IC, marginBottom:8 }} />
           <input type="date" value={f.raceDate} onChange={e => s('raceDate', e.target.value)} style={IC} />
           {daysLeft !== null && <div style={{ fontSize:11, color:'#f59e0b', marginTop:4 }}>เหลืออีก {daysLeft} วัน</div>}
+        </div>
+        <div style={{ marginBottom:16 }}>
+          <div style={{ color:'#9ca3af', fontSize:12, marginBottom:4 }}>🏁 Race B — แข่งระหว่างทาง (ใช้ซ้อม ไม่ใช่เป้า)</div>
+          {f.races.map((r, i) => (
+            <div key={i} style={{ background:'#0d1117', border:'1px solid #1f2937', borderRadius:10, padding:10, marginBottom:8 }}>
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 70px', gap:6, marginBottom:6 }}>
+                <input value={r.name||''} onChange={e => s('races', f.races.map((x, k) => k === i ? { ...x, name:e.target.value } : x))} placeholder="ชื่องาน" style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
+                <input type="number" value={r.km||''} onChange={e => s('races', f.races.map((x, k) => k === i ? { ...x, km:e.target.value } : x))} placeholder="km" style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
+              </div>
+              <div style={{ display:'flex', gap:6 }}>
+                <input type="date" value={r.date||''} onChange={e => s('races', f.races.map((x, k) => k === i ? { ...x, date:e.target.value } : x))} style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
+                <button type="button" onClick={() => s('races', f.races.filter((_, k) => k !== i))} style={{ background:'none', border:'1px solid #7f1d1d', color:'#fca5a5', borderRadius:8, padding:'0 12px', cursor:'pointer', fontFamily:'inherit' }}>ลบ</button>
+              </div>
+            </div>
+          ))}
+          <button type="button" onClick={() => s('races', [...f.races, { name:'', km:'', date:'', priority:'B' }])} style={{ ...BTN('#1f2937', '#f43f5e'), width:'100%', padding:'10px 14px', fontSize:13 }}>+ เพิ่ม Race B</button>
         </div>
         <div style={{ marginBottom:16 }}>
           <div style={{ color:'#9ca3af', fontSize:12, marginBottom:8 }}>📍 Phase ปัจจุบัน</div>
@@ -535,7 +564,7 @@ function GoalScreen({ profile, user, onSave, isEdit, onCancel }) {
 }
 
 // ── PLAN SCREEN ───────────────────────────────────────────────────────────────
-function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, saveMsg, onManualSave, volGuide }) {
+function PlanScreen({ profile, week, onUpdate, valResult, valLoad, onValidate, saving, saveMsg, onManualSave, volGuide }) {
   const ph = phaseObj(week.phase)
   const vc = { 'ผ่าน':'#22c55e', 'ปรับเล็กน้อย':'#f59e0b', 'ต้องแก้':'#ef4444' }
   const sc = s => s >= 80 ? '#22c55e' : s >= 60 ? '#f59e0b' : '#ef4444'
@@ -593,6 +622,20 @@ function PlanScreen({ week, onUpdate, valResult, valLoad, onValidate, saving, sa
           ))}
         </div>
       </div>
+
+      {/* Race B ที่ตกในสัปดาห์ปฏิทินนี้ (จากหน้าตั้งค่า) */}
+      {(() => {
+        const t = todayD(), mon = new Date(t); mon.setDate(t.getDate() - ((t.getDay() + 6) % 7))
+        const sun = new Date(mon); sun.setDate(mon.getDate() + 6)
+        return (profile?.races || []).filter(r => r.date).map(r => ({ ...r, d: parseD(r.date) }))
+          .filter(r => r.d >= mon && r.d <= sun).map((r, k) => {
+            const di = (r.d.getDay() + 6) % 7, already = week.sessions[di]?.race?.on
+            return <div key={k} style={{ background:'#1f0a12', border:'1px solid #f43f5e60', borderRadius:10, padding:'8px 12px', marginBottom:12, display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+              <div style={{ fontSize:12, color:'#fda4af' }}>🏁 สัปดาห์นี้มี {r.name || 'แข่ง'} {r.km ? `${r.km} km ` : ''}วัน{DAYS[di]}</div>
+              {!already && <button onClick={() => onUpdate({ ...week, sessions: week.sessions.map((d, i) => i === di ? { ...d, race:{ on:true, name:r.name||'', km:r.km||'', priority:r.priority||'B' }, raceTouched:true } : d) })} style={{ background:'#f43f5e', color:'#fff', border:'none', borderRadius:8, padding:'5px 10px', fontSize:11, cursor:'pointer', fontFamily:'inherit', flexShrink:0 }}>ใส่ในตาราง</button>}
+            </div>
+          })
+      })()}
 
       {/* Guard Rail Warnings */}
       {hardWarnings.length > 0 && (

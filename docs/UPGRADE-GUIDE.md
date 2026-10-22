@@ -57,3 +57,6 @@ supabase functions deploy coach
 
 ถ้ายังไม่ทำข้อ 1: ติ๊ก "มีแข่ง"/ขอ feedback ได้ แต่จะไม่ถูกบันทึกถาวร (การบันทึกตารางปกติไม่เสีย)
 ถ้ายังไม่ทำข้อ 2: ปุ่ม "ส่งผลซ้อม & ขอ feedback" จะ error
+
+### รอบ 3: ตั้ง Race A/B ในหน้า ⚙️ Goal
+รัน `supabase/migrations/20261023_profile_races.sql` ใน SQL Editor (เพิ่ม 2 คอลัมน์ใน `profiles`, รันซ้ำได้) — ถ้ายังไม่รัน การบันทึก Goal ปกติไม่เสีย แต่รายการ Race จะไม่ถูกเก็บ

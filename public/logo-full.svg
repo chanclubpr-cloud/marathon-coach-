@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 512">
+  <rect width="1100" height="512" rx="112" fill="#0a0f1a"/>
+  <g transform="translate(20 0)"><circle cx="318" cy="128" r="36" fill="#4ade80"/>
+  <g fill="none" stroke="#4ade80" stroke-width="38" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M290 195L240 290"/>
+    <path d="M285 210L340 250L385 215"/>
+    <path d="M280 215L225 245L180 215"/>
+    <path d="M240 290L325 325L305 415"/>
+    <path d="M240 290L190 350L110 335"/>
+  </g></g>
+  <text x="520" y="290" font-family="Arial Black,Arial,Helvetica,sans-serif" font-weight="900" font-size="150" fill="#fff">Chan</text>
+  <text x="520" y="415" font-family="Arial Black,Arial,Helvetica,sans-serif" font-weight="900" font-size="150" fill="#4ade80">Run</text>
+</svg>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from './supabase.js'
-import { guessType, deriveZones, calcZones, ruleChecks, safetyFlags, checkAIPlan, weeksToRace, suggestPhase } from './coachRules.js'
+import { guessType, fixType, deriveZones, calcZones, ruleChecks, safetyFlags, checkAIPlan, weeksToRace, suggestPhase } from './coachRules.js'
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const PHASES = [
@@ -154,7 +154,7 @@ export default function App() {
                 ...found,
                 day: dayName,
                 dayIndex: i,
-                type: found.session_type || found.type || 'rest',
+                type: fixType({ plan: found.plan, type: found.session_type || found.type || 'rest' }),
                 plan: found.plan || '',
                 done: found.done || false,
                 distance: found.distance || '',
@@ -187,7 +187,7 @@ export default function App() {
         weekNum: w2.week_num, phase: w2.phase, targetVolume: w2.target_volume,
         notes: w2.notes || '', archivedAt: w2.archived_at,
         sessions: (w2.sessions || []).sort((a, b) => a.day_index - b.day_index)
-          .map(s => ({ ...s, type: s.session_type }))
+          .map(s => ({ ...s, type: fixType({ plan: s.plan, type: s.session_type }) }))
       })))
 
       // Zones
@@ -332,15 +332,19 @@ export default function App() {
 
   // ── AI Analysis ───────────────────────────────────────────────────────────
   const runAI = async () => {
+    // สัปดาห์ยังไม่จบ? วันหลังวันสุดท้ายที่บันทึก = "ยังไม่ถึง" ไม่ใช่ "ไม่ได้ทำ"
+    const lastDone = week.sessions.reduce((m, d, i) => (d.done ? i : m), -1)
+    const partial = lastDone >= 0 && lastDone < 6 &&
+      !window.confirm(`สัปดาห์นี้จบแล้วหรือยัง?\n\nตกลง = จบแล้ว (วันที่ไม่ได้บันทึกนับว่าข้าม)\nยกเลิก = ยังไม่จบ (วิเคราะห์ถึงวัน${DAYS[lastDone]})`)
     setAiLoad(true); setAiResult(null)
     try {
       const planText = week.sessions.map(d => `${d.day}: ${d.plan || (d.type === 'rest' ? 'พัก' : 'ไม่ได้วาง')}`).join('\n')
-      const actText  = week.sessions.map(d => `${d.day}: ${d.done ? `✓ ${d.distance}km ${d.duration}min pace:${d.pace || '-'} HR:${d.hr || '-'} RPE:${d.rpe} "${d.feel}" ${d.notes ? `(${d.notes})` : ''}` : d.type === 'rest' ? 'พัก' : 'ไม่ได้ทำ'}`).join('\n')
+      const actText  = week.sessions.map((d, i) => `${d.day}: ${d.done ? `✓ ${d.distance}km ${d.duration}min pace:${d.pace || '-'} HR:${d.hr || '-'} RPE:${d.rpe} "${d.feel}" ${d.notes ? `(${d.notes})` : ''}` : d.type === 'rest' ? 'พัก' : (partial && i > lastDone) ? 'ยังไม่ถึง' : 'ไม่ได้ทำ'}`).join('\n')
       const prevText = history.slice(-4).map(w2 => `W${w2.weekNum}[${w2.phase}]: vol=${totalVol(w2).toFixed(1)}km RPE=${avgRPE(w2)} LR=${lrKm(w2)}km`).join('\n')
       const flags    = safetyFlags(week.sessions, week.notes)
       const flagText = flags.length ? flags.map(f => `[${f.level === 'red' ? 'อันตราย' : 'เฝ้าระวัง'}] ${f.day}: ${f.text}`).join('\n') : 'ไม่พบ'
-      const ai = await callCoach('analyze', `${factsText()}\n\nแผน:\n${planText}\n\nผลจริง:\n${actText}\nVol จริง:${totalVol(week).toFixed(1)}/${week.targetVolume}km RPE เฉลี่ย:${avgRPE(week)} LR:${lrKm(week)}km\nโน้ตสัปดาห์:${week.notes || '-'}\n\nสัญญาณที่ระบบตรวจพบ:\n${flagText}\n\nประวัติ 4 สัปดาห์:\n${prevText || 'ยังไม่มี'}`)
-      const nextCtx = { ...ruleCtx(), prevVolume: totalVol(week) || prevVol, prevLongRun: Math.max(prevLR, lrKm(week)) }
+      const ai = await callCoach('analyze', `${factsText()}\n\nแผน:\n${planText}\n\nผลจริง:\n${actText}\n${partial ? `**สัปดาห์ยังไม่จบ** (บันทึกถึงวัน${DAYS[lastDone]}) — วันที่เขียนว่า "ยังไม่ถึง" ห้ามนับเป็นการข้าม/ไม่ทำ และห้ามสรุป volume ต่ำจากตัวเลขบางส่วน ประเมินเฉพาะที่ผ่านมา แล้วร่างแผนสัปดาห์หน้าโดยสมมติว่าวันที่เหลือทำตามแผน\n` : ''}Vol จริง:${totalVol(week).toFixed(1)}/${week.targetVolume}km RPE เฉลี่ย:${avgRPE(week)} LR:${lrKm(week)}km\nโน้ตสัปดาห์:${week.notes || '-'}\n\nสัญญาณที่ระบบตรวจพบ:\n${flagText}\n\nประวัติ 4 สัปดาห์:\n${prevText || 'ยังไม่มี'}`)
+      const nextCtx = { ...ruleCtx(), prevVolume: partial ? (+week.targetVolume || prevVol) : (totalVol(week) || prevVol), prevLongRun: Math.max(prevLR, lrKm(week)) }
       setAiResult({ ...ai, planWarnings: checkAIPlan(ai, nextCtx), localFlags: flags })
     } catch (e) { setAiResult({ error: 'วิเคราะห์ไม่สำเร็จ: ' + e.message }) }
     setAiLoad(false)

@@ -36,7 +36,8 @@ const REPS = /\b\d{3,4}\s*m?\s*[x×*]\s*\d+/
 export const guessType = text => {
   const raw = (text || '').trim()
   const s = raw.toLowerCase()
-  if (!raw || s === '-' || /พัก|^rest\b|^off\b/.test(s)) return 'rest'
+  // "พัก" เป็นวันพักเฉพาะเมื่อเป็นคำแรก — ไม่ใช่ "พัก 2 นาที" ที่แทรกอยู่ในโจทย์ interval
+  if (!raw || s === '-' || /^(พัก|rest\b|off\b)/.test(s)) return 'rest'
   if (/body\s*weight|weight|core|bosu|โยคะ|yoga|เวท/.test(s) && !/\d+\s*(km|กม|min|นาที)/.test(s)) return 'other'
 
   const hasStride = HAS_STRIDE.test(s) || /stride|สตรายด์/.test(s)
@@ -60,6 +61,9 @@ export const guessType = text => {
   if (!isNaN(km)) return 'easy'
   return 'other'
 }
+
+// ซ่อมประเภทที่เคยถูกเดาผิดเป็น rest ทั้งที่มีโจทย์ซ้อม (ไม่แก้ข้อมูลในฐาน — คำนวณตอนอ่าน)
+export const fixType = d => (d?.plan && d.type === 'rest' ? guessType(d.plan) : d?.type)
 
 // ── Zone จาก Speed Test ──────────────────────────────────────────────────────
 // ตัวคูณเทียบจาก "pace ของการวิ่ง 3 นาที" ปรับเทียบกับผลที่โค้ชคำนวณให้จริง
@@ -111,8 +115,9 @@ export const suggestPhase = weeksLeft => {
 
 // ── ตรวจโปรแกรมแบบกฎ (deterministic) ────────────────────────────────────────
 // คืนค่า [{rule, pass, level:'error'|'warn'|'info', comment}]
-export const ruleChecks = ({ sessions, targetVolume, prevVolume, prevLongRun, maxLongRun, phase, weekNum, raceDate }) => {
+export const ruleChecks = ({ sessions: rawSessions, targetVolume, prevVolume, prevLongRun, maxLongRun, phase, weekNum, raceDate }) => {
   const out = []
+  const sessions = rawSessions.map(d => ({ ...d, type: fixType(d) }))
   const planned = sessions.filter(d => d.plan && d.type !== 'rest')
   const runDays = planned.length
 

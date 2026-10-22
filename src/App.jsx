@@ -234,6 +234,11 @@ export default function App() {
         .select().single()
       if (nw) { setWeekId(nw.id); setWeek(emptyWeek(+goalData.weekNum||1, goalData.phase||'base')) }
     }
+    // ให้สอดคล้องกับหน้าวางแผน/บันทึก: Phase และเลขสัปดาห์ของสัปดาห์ปัจจุบัน
+    if (weekId && (goalData.phase !== week.phase || +goalData.weekNum !== week.weekNum)) {
+      const { error: we } = await supabase.from('weeks').update({ phase: goalData.phase, week_num: +goalData.weekNum || week.weekNum }).eq('id', weekId)
+      if (!we) setWeek(w => ({ ...w, phase: goalData.phase, weekNum: +goalData.weekNum || w.weekNum }))
+    }
     setEditGoal(false); setScreen('app')
   }
 
@@ -426,7 +431,7 @@ ${others}`
   // ── RENDER ────────────────────────────────────────────────────────────────
   if (screen === 'loading') return <Loader />
   if (screen === 'login')   return <LoginScreen onLogin={loginWithGoogle} />
-  if (screen === 'goal' || editGoal) return <GoalScreen profile={profile} user={user} onSave={saveGoal} isEdit={editGoal} onCancel={() => setEditGoal(false)} />
+  if (screen === 'goal' || editGoal) return <GoalScreen profile={profile} week={editGoal ? week : null} user={user} onSave={saveGoal} isEdit={editGoal} onCancel={() => setEditGoal(false)} />
 
   const daysLeft = profile?.race_date ? Math.max(0, Math.ceil((new Date(profile.race_date) - new Date()) / (1000 * 60 * 60 * 24))) : null
   const volGuide = getVolumeGuide(week.phase, week.weekNum, history.length ? totalVol(history[history.length-1]) : 0)
@@ -492,13 +497,13 @@ function LoginScreen({ onLogin }) {
 }
 
 // ── GOAL SCREEN ───────────────────────────────────────────────────────────────
-function GoalScreen({ profile, user, onSave, isEdit, onCancel }) {
+function GoalScreen({ profile, week, user, onSave, isEdit, onCancel }) {
   const [f, setF] = useState({
     targetPace: profile?.target_pace || '5:30',
     raceDate:   profile?.race_date   || '',
-    phase:      profile?.phase       || 'base',
+    phase:      week?.phase          || profile?.phase || 'base',   // ช่วงปัจจุบัน = ของสัปดาห์ที่กำลังซ้อมอยู่
     maxLongRun: profile?.max_long_run|| 15,
-    weekNum:    profile?.week_num    || 1,
+    weekNum:    week?.weekNum        || profile?.week_num || 1,
     raceName:   profile?.race_name   || '',
     races:      Array.isArray(profile?.races) ? profile.races : [],
   })
@@ -520,7 +525,7 @@ function GoalScreen({ profile, user, onSave, isEdit, onCancel }) {
         <div style={{ marginBottom:16 }}>
           <div style={{ color:'#9ca3af', fontSize:12, marginBottom:6 }}>🏆 Race A — มาราธอนเป้าหมายหลัก</div>
           <input value={f.raceName} onChange={e => s('raceName', e.target.value)} placeholder="ชื่องาน เช่น Bangkok Marathon" style={{ ...IC, marginBottom:8 }} />
-          <input type="date" value={f.raceDate} onChange={e => s('raceDate', e.target.value)} style={IC} />
+          <DateField value={f.raceDate} onChange={v => s('raceDate', v)} style={IC} />
           {daysLeft !== null && <div style={{ fontSize:11, color:'#f59e0b', marginTop:4 }}>เหลืออีก {daysLeft} วัน</div>}
         </div>
         <div style={{ marginBottom:16 }}>
@@ -532,7 +537,7 @@ function GoalScreen({ profile, user, onSave, isEdit, onCancel }) {
                 <input type="number" value={r.km||''} onChange={e => s('races', f.races.map((x, k) => k === i ? { ...x, km:e.target.value } : x))} placeholder="km" style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
               </div>
               <div style={{ display:'flex', gap:6 }}>
-                <input type="date" value={r.date||''} onChange={e => s('races', f.races.map((x, k) => k === i ? { ...x, date:e.target.value } : x))} style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
+                <DateField value={r.date||''} onChange={v => s('races', f.races.map((x, k) => k === i ? { ...x, date:v } : x))} style={{ ...IC, padding:'8px 10px', fontSize:13 }} />
                 <button type="button" onClick={() => s('races', f.races.filter((_, k) => k !== i))} style={{ background:'none', border:'1px solid #7f1d1d', color:'#fca5a5', borderRadius:8, padding:'0 12px', cursor:'pointer', fontFamily:'inherit' }}>ลบ</button>
               </div>
             </div>
@@ -1119,6 +1124,29 @@ function HistoryScreen({ history }) {
 }
 
 // ── SHARED ────────────────────────────────────────────────────────────────────
+// ช่องวันที่แบบพิมพ์เอง dd/mm/yyyy (รับ พ.ศ. ได้) — ใช้แทน input type=date ที่บางเครื่องพิมพ์ไม่ได้
+const isoToText = iso => { if (!iso) return ''; const [y,m,d] = iso.split('-'); return `${d}/${m}/${y}` }
+const textToIso = t => {
+  const m = String(t).trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/)
+  if (!m) return null
+  let [, d, mo, y] = m; d = +d; mo = +mo; y = +y
+  if (y > 2400) y -= 543
+  const dt = new Date(y, mo - 1, d)
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null
+  return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+}
+function DateField({ value, onChange, style }) {
+  const [txt, setTxt] = useState(isoToText(value))
+  const iso = textToIso(txt)
+  return <div style={{ flex:1 }}>
+    <input value={txt} inputMode="numeric" placeholder="วัน/เดือน/ปี  เช่น 10/01/2027" style={style}
+      onChange={e => { const t = e.target.value; setTxt(t); const v = textToIso(t); if (v) onChange(v); else if (!t.trim()) onChange('') }} />
+    <div style={{ fontSize:10, marginTop:3, color: txt && !iso ? '#fca5a5' : '#6b7280' }}>
+      {iso ? `✓ ${parseD(iso).toLocaleDateString('th-TH',{day:'numeric',month:'long',year:'numeric'})}` : txt ? 'รูปแบบ วัน/เดือน/ปี (ค.ศ. หรือ พ.ศ.)' : 'พิมพ์ วัน/เดือน/ปี ได้ทั้ง ค.ศ. และ พ.ศ.'}
+    </div>
+  </div>
+}
+
 function RaceEditor({ race, onChange }) {
   const r = race || { on:false, name:'', km:'', priority:'B' }
   const set = patch => onChange({ ...r, ...patch })
